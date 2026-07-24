@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "${MYSQL_PORT}:3306"
+    volumes:
+      - db_mysql_data:/var/lib/mysql
+      - ./db/init/mysql:/docker-entrypoint-initdb.d:ro
+
+  mariadb:
+    image: mariadb:10.11
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MARIADB_DATABASE}
+      MYSQL_USER: ${MARIADB_USER}
+      MYSQL_PASSWORD: ${MARIADB_PASSWORD}
+    ports:
+      - "${MARIADB_PORT}:3306"
+    volumes:
+      - db_mariadb_data:/var/lib/mysql
+      - ./db/init/mariadb:/docker-entrypoint-initdb.d:ro
+
+  supabase:
+    # Supabase is Postgres-based. This uses the official Supabase Postgres image.
+    image: supabase/postgres:15.2.0
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_PASSWORD: ${SUPABASE_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${SUPABASE_DB}
+    ports:
+      - "${SUPABASE_PORT}:5432"
+    volumes:
+      - db_supabase_data:/var/lib/postgresql/data
+      - ./db/init/supabase:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  db_mysql_data:
+  db_mariadb_data:
+  db_supabase_data:
