@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#155eef">
+  <title>AUTENTIKO OK NUVEM</title>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <div id="page-loader" class="page-loader">
+    <div class="spinner"></div>
+    <p>Carregando o AUTENTIKO...</p>
+  </div>
+  <script>
+    window.__autentikoStartupTimer = setTimeout(function() {
+      var loader = document.getElementById('page-loader');
+      var publicShell = document.getElementById('public-shell');
+      var appShell = document.getElementById('app-shell');
+      var message = document.getElementById('auth-message');
+      if (loader) loader.classList.add('hidden');
+      if (appShell) appShell.classList.add('hidden');
+      if (publicShell) publicShell.classList.remove('hidden');
+      if (message) {
+        message.textContent = 'O sistema não conseguiu iniciar. Atualize a página com Ctrl+F5. Se o problema continuar, informe o suporte.';
+        message.className = 'form-message';
+      }
+    }, 20000);
+  </script>
+
+  <main id="public-shell" class="public-shell hidden">
+    <section class="brand-panel">
+      <div class="brand-mark">A</div>
+      <div>
+        <p class="eyebrow">PALMER IMÓVEIS</p>
+        <h1 id="public-title">AUTENTIKO OK NUVEM</h1>
+        <p id="public-subtitle">Sistema de gestão administrativa de processos internos.</p>
+      </div>
+      <ul class="feature-list">
+        <li>Processos e documentos em um único painel</li>
+        <li>Permissões por perfil e trilha de auditoria</li>
+        <li>Acesso seguro por senha ou código de e-mail</li>
+      </ul>
+    </section>
+
+    <section class="auth-panel">
+      <div class="auth-card">
+        <div class="mobile-brand"><span class="brand-mark small">A</span><strong>AUTENTIKO</strong></div>
+        <div class="auth-tabs" role="tablist">
+          <button class="auth-tab active" data-auth-view="login">Entrar</button>
+          <button class="auth-tab" data-auth-view="email">Código</button>
+          <button class="auth-tab" data-auth-view="register">Cadastrar</button>
+          <button class="auth-tab" data-auth-view="recover">Recuperar</button>
+        </div>
+
+        <form id="login-form" class="auth-view active">
+          <h2>Bem-vindo</h2><p class="muted">Entre com seu usuário ou e-mail.</p>
+          <label>Usuário ou e-mail<input name="login" autocomplete="username" maxlength="254" required></label>
+          <label>Senha<input name="password" type="password" autocomplete="current-password" maxlength="256" required></label>
+          <button class="btn primary" type="submit">Entrar</button>
+        </form>
+
+        <form id="email-form" class="auth-view">
+          <h2>Código por e-mail</h2><p class="muted">Enviaremos um código de seis dígitos.</p>
+          <label>E-mail<input name="email" type="email" autocomplete="email" maxlength="254" required></label>
+          <button class="btn secondary" id="request-login-code" type="button">Enviar código</button>
+          <label>Código<input name="token" inputmode="numeric" maxlength="6" placeholder="000000" required></label>
+          <button class="btn primary" type="submit">Validar e entrar</button>
+        </form>
+
+        <form id="register-form" class="auth-view">
+          <h2>Novo cadastro</h2><p class="muted">O acesso será liberado após aprovação.</p>
+          <div class="form-grid two">
+            <label class="span-2">Nome completo<input name="name" autocomplete="name" maxlength="150" required></label>
+            <label>E-mail<input name="email" type="email" autocomplete="email" maxlength="254" required></label>
+            <label>Usuário<input name="username" autocomplete="username" minlength="4" maxlength="40" required></label>
+            <label class="span-2">Senha<input name="password" type="password" autocomplete="new-password" minlength="10" maxlength="256" required></label>
+          </div>
+          <p class="hint">Mínimo de 10 caracteres, com maiúscula, minúscula e número.</p>
+          <button class="btn primary" type="submit">Solicitar cadastro</button>
+        </form>
+
+        <form id="recover-form" class="auth-view">
+          <h2>Recuperar senha</h2><p class="muted">Solicite o código e defina uma nova senha.</p>
+          <label>E-mail<input name="email" type="email" autocomplete="email" maxlength="254" required></label>
+          <button class="btn secondary" id="request-reset-code" type="button">Enviar código</button>
+          <label>Código<input name="token" inputmode="numeric" maxlength="6" required></label>
+          <label>Nova senha<input name="password" type="password" autocomplete="new-password" minlength="10" maxlength="256" required></label>
+          <button class="btn primary" type="submit">Redefinir senha</button>
+        </form>
+        <p id="auth-message" class="form-message" aria-live="polite"></p>
+      </div>
+    </section>
+  </main>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand"><span class="brand-mark small">A</span><div><strong>AUTENTIKO</strong><small>OK NUVEM</small></div></div>
+      <nav>
+        <button class="nav-btn active" data-view="dashboard"><span>⌂</span>Painel</button>
+        <button class="nav-btn" data-view="processes"><span>▤</span>Processos</button>
+        <button class="nav-btn" data-view="contracts"><span>§</span>Contratos</button>
+        <button class="nav-btn hidden" id="admin-nav" data-view="admin"><span>⚙</span>Administração</button>
+      </nav>
+      <div class="sidebar-footer"><div class="user-avatar" id="user-avatar">A</div><div><strong id="user-name">Usuário</strong><small id="user-role">Perfil</small></div></div>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div><p class="eyebrow" id="company-name">PALMER IMÓVEIS</p><h2 id="view-title">Painel administrativo</h2></div>
+        <div class="top-actions"><span id="maintenance-badge" class="badge warning hidden">Manutenção</span><button class="btn ghost compact" id="change-password-btn">Alterar senha</button><button class="btn ghost compact" id="logout-btn">Sair</button></div>
+      </header>
+
+      <section id="dashboard-view" class="app-view active">
+        <div id="metrics" class="metrics-grid"></div>
+        <div class="section-card queue-card">
+          <div class="section-head"><div><h3>Processos recentes</h3><p>Fila ordenada pela data de criação.</p></div><button class="btn primary compact" id="new-process-btn">+ Novo processo</button></div>
+          <div class="filters"><input id="dashboard-search" placeholder="Buscar protocolo, cliente, CPF ou endereço"><select id="dashboard-status"><option value="">Todos os status</option></select><button class="btn secondary compact" id="dashboard-filter-btn">Filtrar</button></div>
+          <div id="dashboard-processes" class="process-list"></div>
+        </div>
+      </section>
+
+      <section id="processes-view" class="app-view">
+        <div class="section-card">
+          <div class="section-head"><div><h3>Todos os processos</h3><p>Consulte, filtre e acompanhe a tramitação.</p></div><button class="btn primary compact js-new-process">+ Novo processo</button></div>
+          <div class="filters wrap"><input id="process-search" placeholder="Buscar"><select id="process-status"><option value="">Todos os status</option></select><select id="process-type"><option value="">Todos os tipos</option></select><label class="check"><input id="process-mine" type="checkbox"> Somente os meus</label><button class="btn secondary compact" id="process-filter-btn">Aplicar</button></div>
+          <div id="all-processes" class="process-list"></div>
+        </div>
+      </section>
+
+      <section id="contracts-view" class="app-view">
+        <div class="section-card">
+          <div class="section-head"><div><h3>Contratos</h3><p>Propostas aceitas, emissões, assinaturas e conferência.</p></div><button class="btn secondary compact" id="refresh-contracts-btn">Atualizar</button></div>
+          <div class="contract-queue-tabs" id="contract-queue-tabs"></div>
+          <div id="contracts-table"><div class="empty-state">Abra esta área para carregar os contratos.</div></div>
+        </div>
+      </section>
+
+      <section id="admin-view" class="app-view">
+        <div class="section-card">
+          <div class="section-head"><div><h3>Administração</h3><p>Usuários, permissões, documentos, formulários e configurações.</p></div><button class="btn secondary compact" id="refresh-admin-btn">Atualizar</button></div>
+          <div class="subtabs"><button class="subtab active" data-admin-tab="users">Usuários</button><button class="subtab" data-admin-tab="documents">Documentos</button><button class="subtab" data-admin-tab="fields">Campos</button><button class="subtab" data-admin-tab="models">Modelos contratuais</button><button class="subtab" data-admin-tab="settings">Configurações</button></div>
+          <div id="admin-users" class="admin-tab active"><div class="admin-toolbar"><button class="btn primary compact" id="add-user-btn">+ Usuário</button></div><div id="users-table"></div></div>
+          <div id="admin-documents" class="admin-tab"><div class="admin-toolbar"><button class="btn primary compact" id="add-doc-btn">+ Tipo de documento</button></div><div id="documents-table"></div></div>
+          <div id="admin-fields" class="admin-tab"><div class="admin-toolbar"><select id="field-type-filter"></select><button class="btn primary compact" id="add-field-btn">+ Campo</button></div><div id="fields-table"></div></div>
+          <div id="admin-models" class="admin-tab"><div id="contract-models-table"></div></div>
+          <div id="admin-settings" class="admin-tab"><div id="settings-table"></div></div>
+        </div>
+      </section>
+    </section>
+  </div>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden" aria-hidden="true">
+    <div id="process-modal" class="modal xl hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><div><p class="eyebrow">NOVO PROCESSO</p><h2>Criar processo</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="process-form">
+        <div class="process-wizard-steps" aria-label="Etapas do cadastro">
+          <span class="active"><i>1</i><strong>Ficha cadastral</strong><small>Dados do processo</small></span>
+          <span><i>2</i><strong>Documentos</strong><small>Upload e prévia</small></span>
+          <span><i>3</i><strong>Finalização</strong><small>Análise agora ou depois</small></span>
+        </div>
+        <label>Tipo de processo<select id="new-process-type" name="type" required><option value="">Selecione...</option></select></label>
+        <div id="dynamic-process-form" class="dynamic-form"></div>
+        <section id="income-acceptance-panel" class="income-acceptance-panel hidden" aria-live="polite">
+          <div class="income-alert-light">!</div>
+          <div><p class="eyebrow">ACEITE ELETRÔNICO NECESSÁRIO</p><h3>A renda informada está abaixo do critério.</h3><p id="income-acceptance-message"></p>
+            <label class="income-acceptance-check"><input id="income-acceptance-check" type="checkbox"><span>Sim, estou ciente de que a renda do inquilino não comporta três vezes o valor da parcela do aluguel.</span></label>
+          </div>
+        </section>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn primary">Próxima etapa: documentos →</button></div>
+      </form>
+    </div>
+
+    <div id="detail-modal" class="modal xl hidden" role="dialog" aria-modal="true">
+      <div class="modal-head detail-modal-head"><div><p class="eyebrow" id="detail-protocol">PROCESSO</p><h2 id="detail-title">Detalhes do processo</h2></div><button class="icon-btn js-close-modal" aria-label="Fechar processo">×</button></div>
+      <div id="detail-action-header" class="process-action-header"><div class="process-action-loading"><span class="mini-spinner"></span> Preparando ações...</div></div>
+      <div id="detail-content"></div>
+    </div>
+
+    <div id="document-upload-modal" class="modal xl hidden" role="dialog" aria-modal="true" aria-labelledby="document-upload-title">
+      <div class="modal-head"><div><p class="eyebrow" id="document-upload-protocol">PROCESSO CADASTRADO</p><h2 id="document-upload-title">Agora envie os documentos</h2></div><button class="icon-btn js-close-modal" aria-label="Fechar">×</button></div>
+      <div class="document-upload-step">
+        <div class="process-wizard-steps compact" aria-label="Etapas do cadastro">
+          <span class="complete"><i>✓</i><strong>Ficha cadastral</strong><small>Dados salvos</small></span>
+          <span class="active"><i>2</i><strong>Documentos</strong><small>Upload e prévia</small></span>
+          <span><i>3</i><strong>Finalização</strong><small>Análise agora ou depois</small></span>
+        </div>
+        <div class="upload-step-intro"><div class="upload-step-icon">✓</div><div><strong>Os dados do processo foram salvos.</strong><p>Selecione um arquivo ou arraste-o para o campo correspondente. Confira a prévia antes de enviar.</p></div></div>
+        <div id="document-upload-content"><div class="empty-state">Carregando documentos...</div></div>
+        <div class="modal-actions upload-step-actions"><button type="button" class="btn ghost" data-finish-document-step>Salvar e continuar depois</button><button type="button" class="btn secondary" data-open-uploaded-process>Abrir processo completo</button></div>
+      </div>
+    </div>
+
+    <div id="preview-modal" class="modal xl preview-modal hidden" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+      <div class="modal-head"><div><p class="eyebrow">PRÉ-VISUALIZAÇÃO SEGURA</p><h2 id="preview-title">Documento</h2></div><div class="preview-head-actions"><button type="button" class="btn ghost compact" data-toggle-preview>Ampliar</button><button type="button" class="icon-btn" data-close-preview aria-label="Fechar pré-visualização">×</button></div></div>
+      <div class="preview-toolbar"><div id="preview-metadata" class="preview-metadata"></div><div class="preview-view-actions"><button type="button" class="btn ghost compact" data-rotate-preview="-90" aria-label="Girar para a esquerda">↶ Girar</button><strong id="preview-rotation-label">0°</strong><button type="button" class="btn ghost compact" data-rotate-preview="90" aria-label="Girar para a direita">Girar ↷</button><button type="button" class="btn ghost compact hidden" id="preview-open-tab-btn" data-preview-open-tab>Abrir em nova guia</button><button type="button" class="btn secondary compact hidden" id="preview-download-btn" data-preview-download>Baixar</button></div></div>
+      <div id="pdf-preview-controls" class="pdf-preview-controls hidden" aria-label="Controles do PDF"><button type="button" class="btn ghost compact" data-pdf-previous>← Anterior</button><span><strong id="pdf-current-page">1</strong> de <strong id="pdf-total-pages">1</strong></span><button type="button" class="btn ghost compact" data-pdf-next>Próxima →</button><span class="pdf-control-separator"></span><button type="button" class="btn ghost compact" data-pdf-zoom-out aria-label="Diminuir zoom">−</button><strong id="pdf-zoom-label">100%</strong><button type="button" class="btn ghost compact" data-pdf-zoom-in aria-label="Aumentar zoom">+</button></div>
+      <div id="preview-content" class="preview-stage"><div class="empty-state">Preparando prévia...</div></div>
+    </div>
+
+    <div id="forward-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="forward-modal-title">
+      <div class="modal-head"><div><p class="eyebrow">TRAMITAÇÃO</p><h2 id="forward-modal-title">Encaminhar processo</h2></div><button type="button" class="icon-btn" data-close-forward aria-label="Fechar encaminhamento">×</button></div>
+      <form id="forward-form">
+        <div id="forward-summary" class="forward-summary"></div>
+        <fieldset><legend>1. Escolha o destino</legend><div id="forward-sectors" class="forward-sector-grid"></div></fieldset>
+        <fieldset><legend>2. Escolha o responsável</legend><div id="forward-users" class="forward-user-list"><div class="empty-state compact">Selecione primeiro o setor.</div></div></fieldset>
+        <label>Observação (opcional)<textarea name="observation" maxlength="2000" placeholder="Orientação para o responsável que receberá o processo"></textarea></label>
+        <div id="forward-message" class="form-message" aria-live="polite"></div>
+        <div class="modal-actions"><button type="button" class="btn ghost" data-close-forward>Cancelar</button><button type="submit" class="btn primary" disabled>Encaminhar processo</button></div>
+      </form>
+    </div>
+
+    <div id="user-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><h2 id="user-modal-title">Usuário</h2><button class="icon-btn js-close-modal">×</button></div>
+      <form id="user-form">
+        <input type="hidden" name="id">
+        <div class="form-grid two"><label class="span-2">Nome<input name="name" maxlength="150" required></label><label>E-mail<input name="email" type="email" maxlength="254" required></label><label>Usuário<input name="username" minlength="4" maxlength="40" required></label><label>Perfil<select name="role"></select></label><label>Status<select name="status"></select></label></div>
+        <fieldset><legend>Permissões adicionais</legend><div id="user-permissions" class="check-grid"></div></fieldset>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button class="btn primary" type="submit">Salvar usuário</button></div>
+      </form>
+    </div>
+
+    <div id="doc-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><h2>Tipo de documento</h2><button class="icon-btn js-close-modal">×</button></div>
+      <form id="doc-form"><input type="hidden" name="id"><label>Nome do documento<input name="name" maxlength="200" required></label><div class="form-grid two"><label>Ordem<input name="order" type="number" value="999"></label><label>Limite (MB)<input name="maxMb" type="number" min="1" max="6" value="6"></label></div><label>Formatos MIME<input name="mimeTypes" maxlength="500" value="application/pdf,image/jpeg,image/png"></label><fieldset><legend>Categorias de conferência gerencial</legend><div id="doc-category-rules" class="check-grid"></div></fieldset><fieldset><legend>Regras por tipo de processo</legend><p class="doc-rules-help">Escolha onde o documento aparece e em quais processos ele é obrigatório.</p><div id="doc-process-rules" class="doc-rules-grid"></div></fieldset><div class="switches"><label class="check"><input name="active" type="checkbox" checked> Tipo de documento ativo</label></div><div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button class="btn primary">Salvar regras</button></div></form>
+    </div>
+
+    <div id="participant-modal" class="modal xl hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><div><p class="eyebrow">PARTICIPANTE DO PROCESSO</p><h2 id="participant-modal-title">Adicionar participante</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="participant-form">
+        <input type="hidden" name="id"><input type="hidden" name="recordVersion">
+        <div class="form-grid two"><label>Tipo de pessoa<select name="personType"><option value="PF">Pessoa física</option><option value="PJ">Pessoa jurídica</option></select></label><label>CPF ou CNPJ<input name="document" maxlength="18" required data-participant-document></label><label class="span-2">Nome completo ou razão social<input name="name" maxlength="200" required></label><label>Nome fantasia<input name="tradeName" maxlength="200"></label><label>RG ou inscrição estadual<input name="rgIe" maxlength="80"></label><label>Data de nascimento/abertura<input name="birthOpening" type="date"></label><label>Representante legal<input name="legalRepresentative" maxlength="200"></label></div>
+        <fieldset><legend>Papéis no processo</legend><div id="participant-role-rules" class="check-grid"></div></fieldset>
+        <div class="form-grid two"><label>Nacionalidade<input name="nationality" maxlength="80"></label><label>Estado civil<input name="maritalStatus" maxlength="80"></label><label>Regime de bens<input name="propertyRegime" maxlength="120"></label><label>Profissão<input name="profession" maxlength="120"></label><label>Renda mensal<input name="income" data-mask="currency" inputmode="decimal"></label><label>Empresa/local de trabalho<input name="employer" maxlength="180"></label><label>Cargo/função<input name="job" maxlength="180"></label><label>E-mail<input name="email" type="email" maxlength="254"></label><label>Telefone<input name="phone" type="tel" maxlength="20" data-mask="phone"></label></div>
+        <fieldset><legend>Endereço</legend><div class="form-grid three"><label>CEP<input name="zip" maxlength="9" data-mask="cep"></label><label class="span-2">Rua<input name="street" maxlength="180"></label><label>Número<input name="number" maxlength="30"></label><label>Bairro<input name="district" maxlength="120"></label><label>Complemento<input name="complement" maxlength="120"></label><label>Cidade<input name="city" maxlength="120"></label><label>UF<input name="state" maxlength="2"></label></div></fieldset>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn primary">Salvar participante</button></div>
+      </form>
+    </div>
+
+    <div id="proposal-modal" class="modal xl hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><div><p class="eyebrow">PROPOSTA COMERCIAL</p><h2>Nova revisão de proposta</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="proposal-form">
+        <div class="form-grid two"><label>Tipo de proposta<select name="proposalType" required></select></label><label>Ofertante<select name="offererId" required></select></label><label>Destinatário<select name="recipientId" required></select></label><label>Valor inicialmente ofertado<input name="initialValue" data-mask="currency" required></label><label>Valor proposto<input name="proposedValue" data-mask="currency" required></label><label>Valor negociado<input name="negotiatedValue" data-mask="currency"></label><label>Valor aceito<input name="acceptedValue" data-mask="currency"></label></div>
+        <label>Observações<textarea name="observations" maxlength="5000"></textarea></label>
+        <fieldset><legend>Condições — uma por linha no formato “tipo: descrição”</legend><textarea name="conditionsText" maxlength="10000" placeholder="Pagamento: entrada de 20%&#10;Prazo: conclusão em 30 dias"></textarea></fieldset>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn primary">Criar revisão imutável</button></div>
+      </form>
+    </div>
+
+    <div id="proposal-accept-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="proposal-accept-title">
+      <div class="modal-head"><div><p class="eyebrow">ACEITE ELETRÔNICO DA PROPOSTA</p><h2 id="proposal-accept-title">Confirmar proposta</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="proposal-accept-form">
+        <input type="hidden" name="proposalId">
+        <div id="proposal-accept-summary" class="forward-summary"></div>
+        <label>Documento que comprova o aceite do proprietário<select name="evidenceDocumentId" required></select></label>
+        <p class="notice warning">Ao confirmar, você declara que leu a proposta, conferiu seus valores e condições e verificou a evidência selecionada.</p>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn success">✓ Confirmar aceite da proposta</button></div>
+      </form>
+    </div>
+
+    <div id="workflow-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><div><p class="eyebrow">FLUXO HIERÁRQUICO</p><h2 id="workflow-modal-title">Confirmar etapa</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="workflow-form">
+        <input type="hidden" name="action">
+        <div id="workflow-modal-summary" class="forward-summary"></div>
+        <label id="workflow-recipient-field">Responsável de destino<select name="recipientId"></select></label>
+        <label id="workflow-scope-field">Tipo de pendência<select name="scope"><option value="PROCESSO">Processo completo</option><option value="DOCUMENTO">Documento específico</option></select></label>
+        <label id="workflow-document-field">Documento<select name="documentId"></select></label>
+        <label>Justificativa ou observação<textarea name="observation" maxlength="5000"></textarea></label>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn primary">Confirmar ação</button></div>
+      </form>
+    </div>
+
+    <div id="field-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><h2>Campo de formulário</h2><button class="icon-btn js-close-modal">×</button></div>
+      <form id="field-form"><input type="hidden" name="id"><label>Tipo de processo<select name="processType" required></select></label><div class="form-grid two"><label>Seção<input name="section" maxlength="120" required></label><label>Ordem<input name="order" type="number" value="999"></label><label>Nome técnico<input name="name" pattern="[A-Za-z][A-Za-z0-9_]{0,79}" maxlength="80" required></label><label>Rótulo<input name="label" maxlength="200" required></label><label>Tipo de campo<select name="input"><option>text</option><option>textarea</option><option>number</option><option>currency</option><option>date</option><option>email</option><option>tel</option><option>cpf</option><option>cep</option><option>select</option></select></label><label>Opções (separadas por vírgula)<input name="options" maxlength="10000"></label></div><div class="switches"><label class="check"><input name="required" type="checkbox"> Obrigatório</label><label class="check"><input name="active" type="checkbox" checked> Ativo</label></div><div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button class="btn primary">Salvar</button></div></form>
+    </div>
+
+    <div id="password-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-head"><div><p class="eyebrow">SEGURANÇA</p><h2>Alterar senha</h2></div><button id="password-modal-close" class="icon-btn js-close-modal">×</button></div>
+      <form id="password-form">
+        <p id="password-required-message" class="notice warning hidden">Você entrou com uma senha temporária. Defina uma nova senha para continuar.</p>
+        <label>Senha atual<input name="currentPassword" type="password" autocomplete="current-password" maxlength="256" required></label>
+        <label>Nova senha<input name="newPassword" type="password" autocomplete="new-password" minlength="10" maxlength="256" required></label>
+        <label>Confirmar nova senha<input name="confirmPassword" type="password" autocomplete="new-password" minlength="10" maxlength="256" required></label>
+        <p class="hint">Use ao menos 10 caracteres, com letra maiúscula, minúscula e número.</p>
+        <div class="modal-actions"><button id="password-cancel-btn" type="button" class="btn ghost js-close-modal">Cancelar</button><button class="btn primary" type="submit">Atualizar senha</button></div>
+      </form>
+    </div>
+  </div>
+
+  <aside id="upload-queue-widget" class="upload-queue-widget hidden" aria-live="polite">
+    <header><div><strong>Envios em segundo plano</strong><span id="upload-queue-summary">Fila vazia</span></div><button type="button" class="icon-btn" data-toggle-upload-queue aria-label="Recolher fila">−</button></header>
+    <div id="upload-queue-items" class="upload-queue-items"></div>
+    <footer><span>Você pode continuar usando o sistema.</span><button type="button" class="link-btn" data-clear-upload-history>Limpar concluídos</button></footer>
+  </aside>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <?!= include('Scripts'); ?>
+</body>
+</html>

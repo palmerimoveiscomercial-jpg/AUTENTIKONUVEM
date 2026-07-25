@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.vercel
+.next
+node_modules
+coverage
+dist
+*.log
+*.tsbuildinfo
+*.pem
+*.key
+*.p12
+service-account*.json
+adobe-credentials*.json
+apps-script/.clasp.json

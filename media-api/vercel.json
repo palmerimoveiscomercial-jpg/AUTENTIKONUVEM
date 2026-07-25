@@ -1,0 +1,11 @@
+{
+  "regions": ["gru1"],
+  "functions": {
+    "src/app/api/v1/media/uploads/complete/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/v1/webhooks/adobe/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}

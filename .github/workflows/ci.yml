@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, "feature/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apps Script static audit
+        run: node apps-script/tests/static-audit.mjs
+      - name: Apps Script integrations
+        run: node apps-script/tests/smoke.mjs
+      - name: Media API tests
+        run: npm test
+      - name: Media API typecheck
+        run: npm run typecheck
+      - name: Media API production build
+        run: npm run build
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high
