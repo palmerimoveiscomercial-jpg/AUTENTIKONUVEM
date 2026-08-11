@@ -137,5 +137,5 @@ scripts.forEach((source, index) => {
 });
 
 console.log(`OK acesso anônimo HTTP 200 (${elapsedMs} ms, ${html.length} bytes)`);
-console.log('OK versão 2.2.0, miniaturas até 80 KB, prévia persistente e upload retomável protegido por flag');
+console.log('OK versão 2.3.0, hierarquia gerencial, rascunho protegido, miniaturas até 80 KB e upload retomável por flag');
 console.log(`OK conteúdo completo do AUTENTIKO disponível em ${response.url}`);

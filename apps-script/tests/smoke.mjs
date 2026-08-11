@@ -407,7 +407,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, 649);
-  assert.equal(diagnostic.codeVersion, '2.2.0');
+  assert.equal(diagnostic.codeVersion, '2.3.0');
   assert.ok(diagnostic.maxFormCacheBytes < 15_000);
 });
 
@@ -849,6 +849,7 @@ check('regras documentais configuráveis por tipo de processo', () => {
 
 let assistantId;
 let managerId;
+let generalManagerId;
 let auditorId;
 let brokerId;
 check('cadastro e filtragem dos destinatários de encaminhamento', () => {
@@ -869,6 +870,15 @@ check('cadastro e filtragem dos destinatários de encaminhamento', () => {
     status: 'ATIVO',
     permissions: [],
     password: 'SenhaGerente123'
+  }, {})).id;
+  generalManagerId = data(context.apiSalvarUsuario(token, {
+    name: 'Gabriela Gerente Geral',
+    email: 'gabriela.geral@example.com',
+    username: 'gabriela.geral',
+    role: 'GERENTE_GERAL',
+    status: 'ATIVO',
+    permissions: [],
+    password: 'SenhaGeral123'
   }, {})).id;
   auditorId = data(context.apiSalvarUsuario(token, {
     name: 'Alice Auditoria',
@@ -891,8 +901,10 @@ check('cadastro e filtragem dos destinatários de encaminhamento', () => {
   const routing = data(context.apiListarDestinatariosProcesso(token, processId));
   const assistantSector = routing.sectors.find((sector) => sector.value === 'ADMINISTRATIVO');
   const managerSector = routing.sectors.find((sector) => sector.value === 'GERENTE_ADMINISTRATIVO');
+  const generalManagerSector = routing.sectors.find((sector) => sector.value === 'GERENTE_GERAL');
   assert.deepEqual([...assistantSector.users.map((user) => user.id)], [assistantId]);
   assert.deepEqual([...managerSector.users.map((user) => user.id)], [managerId]);
+  assert.deepEqual([...generalManagerSector.users.map((user) => user.id)], [generalManagerId]);
   const assistant = context.autFind_('USUARIOS', 'ID_USUARIO', assistantId);
   assert.equal(context.autHasPermission_(assistant, 'PROCESSO_ANALISAR'), true);
   assert.equal(context.autHasPermission_(assistant, 'PROCESSO_ENCAMINHAR'), true);
@@ -900,18 +912,26 @@ check('cadastro e filtragem dos destinatários de encaminhamento', () => {
   assert.equal(context.autHasPermission_(assistant, 'PENDENCIA_GERIR'), true);
   assert.equal(assistantSector.users.some((user) => user.email === setup.developerEmail), false);
   assert.deepEqual(data(context.apiListarDestinatariosFluxo(token, processId, 'AUDITOR')).users.map((user) => user.id), [auditorId]);
+  assert.deepEqual(data(context.apiListarDestinatariosFluxo(token, processId, 'GERENTE_GERAL')).users.map((user) => user.id), [generalManagerId]);
 });
 
 let workflowProcessId;
-check('fluxo completo Corretor → Administrativo → Gerente → Auditor e bloqueio final', () => {
+check('fluxo completo Corretor → Administrativo → Gerente Administrativo → Gerente Geral → Auditor', () => {
   const brokerToken = data(context.apiLogin({ login: 'carlos.corretor', password: 'SenhaCorretor123', context: { device: { browser: 'smoke' } } })).token;
   const administrativeToken = data(context.apiLogin({ login: 'ana.admin', password: 'SenhaAdmin123', context: {} })).token;
   const managerToken = data(context.apiLogin({ login: 'marcos.gerente', password: 'SenhaGerente123', context: {} })).token;
+  const generalManagerToken = data(context.apiLogin({ login: 'gabriela.geral', password: 'SenhaGeral123', context: {} })).token;
   const auditorToken = data(context.apiLogin({ login: 'alice.auditoria', password: 'SenhaAuditor123', context: {} })).token;
   workflowProcessId = data(context.apiCriarProcesso(brokerToken, {
     type: 'COMPRA_IMOVEL_FINANCIADO',
     data: { ...processData, cliente_cpf: '52998224725', titular_cpf: '11144477735' }
   }, { device: { browser: 'smoke' } })).process.id;
+  const draftDeniedToAdministrative = context.apiAbrirProcesso(administrativeToken, workflowProcessId);
+  assert.equal(draftDeniedToAdministrative.ok, false);
+  assert.equal(draftDeniedToAdministrative.code, 'FORBIDDEN');
+  const managerDraftView = data(context.apiAbrirProcesso(managerToken, workflowProcessId));
+  assert.equal(managerDraftView.workflow.routing.executiveView, true);
+  assert.equal(managerDraftView.capabilities.edit, true);
   let detail = data(context.apiDetalharProcesso(brokerToken, workflowProcessId));
   for (const document of detail.requiredDocuments.filter((item) => item.required)) {
     data(context.apiUploadDocumentoForm({
@@ -924,16 +944,20 @@ check('fluxo completo Corretor → Administrativo → Gerente → Auditor e bloq
     }));
   }
   let process = context.autFind_('PROCESSOS', 'ID_PROCESSO', workflowProcessId);
-  data(context.apiEnviarAdministrativo(brokerToken, {
+  const brokerApproval = data(context.apiEnviarAdministrativo(brokerToken, {
     processId: workflowProcessId, expectedVersion: context.autProcessVersion_(process),
     userId: assistantId, observation: 'Documentação completa'
   }, { requestId: 'workflow-send-administrative' }));
+  assert.ok(brokerApproval.acceptanceId);
+  assert.ok(context.autRowsBy_('ACEITES_ELETRONICOS', 'ID_PROCESSO', workflowProcessId)
+    .some((row) => row.ID_ACEITE === brokerApproval.acceptanceId && row.PERFIL === 'CORRETOR'));
   process = context.autFind_('PROCESSOS', 'ID_PROCESSO', workflowProcessId);
   assert.equal(process.STATUS_TRAMITACAO, 'AGUARDANDO_ADMINISTRATIVO');
-  const brokerReadOnly = data(context.apiAbrirProcesso(brokerToken, workflowProcessId));
-  assert.equal(brokerReadOnly.capabilities.edit, false);
-  assert.equal(brokerReadOnly.capabilities.upload, false);
-  assert.equal(brokerReadOnly.capabilities.manageProposal, false);
+  const brokerReadOnly = context.apiAbrirProcesso(brokerToken, workflowProcessId);
+  assert.equal(brokerReadOnly.ok, false);
+  assert.equal(brokerReadOnly.code, 'FORBIDDEN');
+  const assignedAdministrative = data(context.apiAbrirProcesso(administrativeToken, workflowProcessId));
+  assert.equal(assignedAdministrative.workflow.routing.isResponsible, true);
   const lateBrokerUpload = context.apiUploadDocumentoForm({
     token: brokerToken,
     processId: workflowProcessId,
@@ -943,7 +967,7 @@ check('fluxo completo Corretor → Administrativo → Gerente → Auditor e bloq
     file: new BlobMock('%PDF-1.4 late', 'application/pdf', 'late.pdf')
   });
   assert.equal(lateBrokerUpload.ok, false);
-  assert.equal(lateBrokerUpload.code, 'NOT_CURRENT_RESPONSIBLE');
+  assert.equal(lateBrokerUpload.code, 'FORBIDDEN');
   data(context.apiIniciarAnaliseAdministrativa(administrativeToken, {
     processId: workflowProcessId, expectedVersion: context.autProcessVersion_(process)
   }, { requestId: 'workflow-start-administrative' }));
@@ -972,9 +996,19 @@ check('fluxo completo Corretor → Administrativo → Gerente → Auditor e bloq
     }, { requestId: `workflow-category-${category.category}` }));
   }
   process = context.autFind_('PROCESSOS', 'ID_PROCESSO', workflowProcessId);
-  data(context.apiEnviarAuditoria(managerToken, {
+  data(context.apiEnviarGerenteGeral(managerToken, {
     processId: workflowProcessId, expectedVersion: context.autProcessVersion_(process),
-    userId: auditorId, observation: 'Checklist gerencial concluído'
+    userId: generalManagerId, observation: 'Checklist do Gerente Administrativo concluído'
+  }, { requestId: 'workflow-send-general-manager' }));
+  process = context.autFind_('PROCESSOS', 'ID_PROCESSO', workflowProcessId);
+  assert.equal(process.STATUS_TRAMITACAO, 'AGUARDANDO_GERENTE_GERAL');
+  data(context.apiIniciarAnaliseGerenteGeral(generalManagerToken, {
+    processId: workflowProcessId, expectedVersion: context.autProcessVersion_(process)
+  }, { requestId: 'workflow-start-general-manager' }));
+  process = context.autFind_('PROCESSOS', 'ID_PROCESSO', workflowProcessId);
+  data(context.apiEnviarAuditoria(generalManagerToken, {
+    processId: workflowProcessId, expectedVersion: context.autProcessVersion_(process),
+    userId: auditorId, observation: 'Gerência Geral aprovou o processo'
   }, { requestId: 'workflow-send-audit' }));
   process = context.autFind_('PROCESSOS', 'ID_PROCESSO', workflowProcessId);
   data(context.apiIniciarAuditoria(auditorToken, {

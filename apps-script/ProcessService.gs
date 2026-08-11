@@ -1,6 +1,12 @@
+function autIsProcessExecutive_(user) {
+  return ['GERENTE_ADMINISTRATIVO', 'GERENTE_GERAL'].indexOf(String(user && user.PERFIL || '')) >= 0 &&
+    autHasPermission_(user, 'PROCESSO_ANALISAR');
+}
+
 function autCanSeeProcess_(user, process) {
-  if (autHasPermission_(user, 'PROCESSO_VER_TODOS')) return true;
-  return String(process.ID_CRIADOR) === String(user.ID_USUARIO) || String(process.ID_RESPONSAVEL) === String(user.ID_USUARIO) || autNormalize_(process.RESPONSAVEL) === autNormalize_(user.NOME);
+  if (autIsProcessExecutive_(user)) return true;
+  return String(process.ID_RESPONSAVEL) === String(user.ID_USUARIO) ||
+    (!!process.RESPONSAVEL && autNormalize_(process.RESPONSAVEL) === autNormalize_(user.NOME));
 }
 
 function autRequireProcess_(user, processId) {
@@ -22,12 +28,12 @@ function autIsCurrentProcessResponsible_(user, process) {
 function autCanActOnProcess_(user, process, permission) {
   if (!process || String(process.STATUS) === 'FINALIZADO' || process.BLOQUEADO_EM) return false;
   if (!autHasPermission_(user, permission)) return false;
-  return autIsCurrentProcessResponsible_(user, process) || autIsProcessAdministrator_(user);
+  return autIsCurrentProcessResponsible_(user, process) || autIsProcessExecutive_(user);
 }
 
 function autCanEditProcessRegistration_(user, process) {
   if (!process || String(process.STATUS) === 'FINALIZADO' || process.BLOQUEADO_EM) return false;
-  if (autIsProcessAdministrator_(user)) return true;
+  if (autIsProcessExecutive_(user)) return true;
   return autIsCurrentProcessResponsible_(user, process) &&
     ['COM_CORRETOR', 'DEVOLVIDO_CORRETOR'].indexOf(String(process.STATUS_TRAMITACAO || 'COM_CORRETOR')) >= 0;
 }
@@ -111,7 +117,7 @@ function autDashboard_(user, visibleRows) {
     if (row.STATUS === 'FINALIZADO') counts.finalized++;
     if (row.STATUS === 'EM_ANALISE') counts.analysis++;
     if (['REPROVADO', 'RECUSADO'].indexOf(String(row.STATUS)) >= 0) counts.rejected++;
-    if (String(row.ID_RESPONSAVEL) === String(user.ID_USUARIO) || String(row.ID_CRIADOR) === String(user.ID_USUARIO)) counts.mine++;
+    if (String(row.ID_RESPONSAVEL) === String(user.ID_USUARIO)) counts.mine++;
   });
   return counts;
 }
@@ -126,7 +132,7 @@ function apiListarProcessos(token, filters) {
       if (filters.status && row.STATUS !== filters.status) return false;
       if (filters.type && row.TIPO_PROCESSO !== filters.type) return false;
       if (filters.phase && row.FASE !== filters.phase) return false;
-      if (filters.mine && String(row.ID_RESPONSAVEL) !== String(user.ID_USUARIO) && String(row.ID_CRIADOR) !== String(user.ID_USUARIO)) return false;
+      if (filters.mine && String(row.ID_RESPONSAVEL) !== String(user.ID_USUARIO)) return false;
       if (search) {
         var haystack = autNormalize_([row.PROTOCOLO, row.CLIENTE_NOME, row.CLIENTE_CPF, row.CLIENTE_EMAIL, row.RESPONSAVEL, row.IMOVEL_ENDERECO].join(' '));
         if (haystack.indexOf(search) < 0) return false;
@@ -497,7 +503,7 @@ function autProcessMovementsPublic_(processId) {
 
 function autProcessCapabilities_(user, process) {
   var mutable = String(process.STATUS) !== 'FINALIZADO' && !process.BLOQUEADO_EM;
-  var canAct = autIsCurrentProcessResponsible_(user, process) || autIsProcessAdministrator_(user);
+  var canAct = autIsCurrentProcessResponsible_(user, process) || autIsProcessExecutive_(user);
   return {
     edit: autCanEditProcessRegistration_(user, process),
     analyze: autHasPermission_(user, 'PROCESSO_ANALISAR'),
@@ -641,6 +647,11 @@ function autForwardSector_(sector) {
       value: 'GERENTE_ADMINISTRATIVO',
       label: 'Gerente administrativo',
       role: 'GERENTE_ADMINISTRATIVO'
+    },
+    GERENTE_GERAL: {
+      value: 'GERENTE_GERAL',
+      label: 'Gerente geral',
+      role: 'GERENTE_GERAL'
     }
   };
   return sectors[normalized] || null;
@@ -665,7 +676,7 @@ function apiListarDestinatariosProcesso(token, processId) {
   try {
     var actor = autRequireAuth_(token, 'PROCESSO_ENCAMINHAR');
     var process = autRequireProcess_(actor, processId);
-    var sectors = ['ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO'].map(function(key) {
+    var sectors = ['ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'GERENTE_GERAL'].map(function(key) {
       var sector = autForwardSector_(key);
       return {
         value: sector.value,

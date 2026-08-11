@@ -6,6 +6,8 @@ var AUTENTIKO_WORKFLOW_ROLE_BY_STATE = Object.freeze({
   AGUARDANDO_GERENTE: 'GERENTE_ADMINISTRATIVO',
   COM_GERENTE: 'GERENTE_ADMINISTRATIVO',
   CONTRATO_EM_PREPARACAO: 'GERENTE_ADMINISTRATIVO',
+  AGUARDANDO_GERENTE_GERAL: 'GERENTE_GERAL',
+  COM_GERENTE_GERAL: 'GERENTE_GERAL',
   AGUARDANDO_AUDITORIA: 'AUDITOR',
   COM_AUDITOR: 'AUDITOR'
 });
@@ -161,11 +163,13 @@ function autAssertExpectedVersion_(process, expectedVersion) {
 }
 
 function autAssertCurrentResponsible_(actor, process) {
+  if (autIsProcessExecutive_(actor)) return;
   autAssert_(String(process.ID_RESPONSAVEL || '') === String(actor.ID_USUARIO || ''),
     'O processo não está sob sua responsabilidade atual.', 'NOT_CURRENT_RESPONSIBLE');
 }
 
 function autAssertActorRole_(actor, roles) {
+  if (autIsProcessExecutive_(actor)) return;
   autAssert_((roles || []).indexOf(String(actor.PERFIL || '')) >= 0,
     'Seu perfil não pode executar esta etapa do fluxo.', 'INVALID_WORKFLOW_ROLE');
 }
@@ -357,7 +361,7 @@ function apiListarDestinatariosFluxo(token, processId, role) {
   try {
     var actor = autRequireAuth_(token);
     autRequireProcess_(actor, processId);
-    autAssert_(['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'AUDITOR'].indexOf(String(role)) >= 0, 'Perfil de destino inválido.');
+    autAssert_(['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'GERENTE_GERAL', 'AUDITOR'].indexOf(String(role)) >= 0, 'Perfil de destino inválido.');
     return autResult_({ role: role, users: autWorkflowUsersByRole_(role) });
   } catch (err) { return autPublicError_(err); }
 }
@@ -385,12 +389,17 @@ function apiEnviarAdministrativo(token, payload, context) {
       'Conclua todas as pendências antes de encaminhar o processo.', 'OPEN_PENDING');
     var recipient = autWorkflowRecipient_(payload.userId, 'ASSISTENTE_ADMINISTRATIVO');
     var requestKey = autClaimRequest_(actor, 'ENVIAR_ADMINISTRATIVO|' + process.ID_PROCESSO, context);
+    var brokerAcceptance = autCreateAcceptance_(actor, process, {
+      scopeType: 'PROCESSO', scopeId: process.ID_PROCESSO,
+      scopeVersion: autProcessVersion_(process), contentHash: autBuildAdministrativeHash_(process.ID_PROCESSO), decision: 'OK',
+      text: 'Declaro que concluí a ficha cadastral, anexei os documentos exigidos e autorizo o início da análise administrativa.'
+    }, context);
     var result = autMoveProcess_(actor, process, {
       STATUS: 'PENDENTE', FASE: 'ADMINISTRATIVO', STATUS_TRAMITACAO: 'AGUARDANDO_ADMINISTRATIVO',
       ETAPA_ATUAL: 'ADMINISTRATIVO', SETOR_ATUAL: 'ADMINISTRATIVO', ANALISE_INICIADA_EM: ''
     }, 'PROCESSO_ENVIADO_ADMINISTRATIVO', recipient, payload.observation || 'Cadastro e documentos enviados para análise administrativa.', context);
     autCommitRequest_(requestKey);
-    return autResult_({ sent: true, version: result.version, responsible: recipient.NOME });
+    return autResult_({ sent: true, acceptanceId: brokerAcceptance.id, version: result.version, responsible: recipient.NOME });
   } catch (err) { return autPublicError_(err); }
   finally { try { lock.releaseLock(); } catch (ignore) {} }
 }
@@ -436,7 +445,7 @@ function apiConferirDocumento(token, payload, context) {
     autAssertProcessMutable_(process);
     autAssertExpectedVersion_(process, payload.expectedVersion);
     autAssertCurrentResponsible_(actor, process);
-    autAssertActorRole_(actor, ['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'AUDITOR']);
+    autAssertActorRole_(actor, ['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'GERENTE_GERAL', 'AUDITOR']);
     var document = autDocumentForReview_(actor, process, payload.documentId);
     var requestKey = autClaimRequest_(actor, 'CONFERIR_DOCUMENTO|' + document.ID_DOCUMENTO, context);
     var text = 'Declaro que visualizei e conferi o documento ' + document.ARQUIVO_NOME +
@@ -508,8 +517,9 @@ function apiConferirDocumentosValidos(token, payload, context) {
 }
 
 function autReturnRecipient_(process, actor) {
+  var responsibleId = process.ID_RESPONSAVEL || actor.ID_USUARIO;
   var movements = autMovementRows_(process.ID_PROCESSO).filter(function(row) {
-    return String(row.ID_USUARIO_DESTINO || '') === String(actor.ID_USUARIO || '') && row.ID_USUARIO_ORIGEM;
+    return String(row.ID_USUARIO_DESTINO || '') === String(responsibleId || '') && row.ID_USUARIO_ORIGEM;
   });
   var latest = movements.length ? movements[movements.length - 1] : null;
   var id = latest && latest.ID_USUARIO_ORIGEM || process.ID_ULTIMO_REMETENTE || process.ID_CRIADOR;
@@ -532,7 +542,7 @@ function apiPendenciarFluxo(token, payload, context) {
     autAssertProcessMutable_(process);
     autAssertExpectedVersion_(process, payload.expectedVersion);
     autAssertCurrentResponsible_(actor, process);
-    autAssertActorRole_(actor, ['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'AUDITOR']);
+    autAssertActorRole_(actor, ['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'GERENTE_GERAL', 'AUDITOR']);
     var targetType = String(payload.targetType || 'PROCESSO').toUpperCase();
     var targetId = '';
     if (targetType === 'DOCUMENTO') {
@@ -551,7 +561,9 @@ function apiPendenciarFluxo(token, payload, context) {
       ? { status: targetType === 'DOCUMENTO' ? 'PENDENTE_DOCUMENTO' : 'PENDENTE_PROCESSO', flow: 'DEVOLVIDO_CORRETOR', phase: 'DOCUMENTACAO', stage: 'CORRETOR', sector: 'COMERCIAL' }
       : recipient.PERFIL === 'ASSISTENTE_ADMINISTRATIVO'
         ? { status: 'PENDENTE_PROCESSO', flow: 'COM_ADMINISTRATIVO', phase: 'ADMINISTRATIVO', stage: 'ADMINISTRATIVO', sector: 'ADMINISTRATIVO' }
-        : { status: 'PENDENTE_PROCESSO', flow: 'COM_GERENTE', phase: 'GERENCIAL', stage: 'GERENCIAL', sector: 'GERENTE_ADMINISTRATIVO' };
+        : recipient.PERFIL === 'GERENTE_ADMINISTRATIVO'
+          ? { status: 'PENDENTE_PROCESSO', flow: 'COM_GERENTE', phase: 'GERENCIAL', stage: 'GERENCIAL', sector: 'GERENTE_ADMINISTRATIVO' }
+          : { status: 'PENDENTE_PROCESSO', flow: 'COM_GERENTE_GERAL', phase: 'GERENTE_GERAL', stage: 'GERENTE_GERAL', sector: 'GERENTE_GERAL' };
     var requestKey = autClaimRequest_(actor, 'PENDENCIAR_FLUXO|' + process.ID_PROCESSO + '|' + targetId, context);
     var pendingId = autUuid_();
     autAppend_('PENDENCIAS', {
@@ -811,7 +823,7 @@ function apiAprovarTodasCategorias(token, payload, context) {
   finally { try { lock.releaseLock(); } catch (ignore) {} }
 }
 
-function apiEnviarAuditoria(token, payload, context) {
+function apiEnviarGerenteGeral(token, payload, context) {
   var lock = LockService.getScriptLock();
   try {
     var actor = autRequireAuth_(token, 'APROVACAO_GERENCIAL');
@@ -822,6 +834,67 @@ function apiEnviarAuditoria(token, payload, context) {
     autAssertExpectedVersion_(process, payload.expectedVersion);
     autAssertCurrentResponsible_(actor, process);
     autAssertActorRole_(actor, ['GERENTE_ADMINISTRATIVO']);
+    autAssert_(['COM_GERENTE', 'CONTRATO_EM_PREPARACAO'].indexOf(String(process.STATUS_TRAMITACAO)) >= 0,
+      'O processo não está pronto para a Gerência Geral.', 'INVALID_TRANSITION');
+    var administrative = autAdministrativeReadiness_(process);
+    autAssert_(administrative.ready, 'A validação administrativa precisa estar completa antes da Gerência Geral.', 'ADMIN_REVIEW_INCOMPLETE');
+    var missing = AUTENTIKO.REVIEW_CATEGORIES.filter(function(category) { return !autLatestChecklist_(process.ID_PROCESSO, category); });
+    autAssert_(!missing.length, 'Registre uma decisão para todas as categorias: ' + missing.map(autLabel_).join(', '), 'MANAGER_CHECKLIST_INCOMPLETE');
+    autAssert_(!autOpenPendingRows_(process.ID_PROCESSO).length, 'Conclua todas as pendências antes de avançar.', 'OPEN_PENDING');
+    var recipient = autWorkflowRecipient_(payload.userId, 'GERENTE_GERAL');
+    var requestKey = autClaimRequest_(actor, 'ENVIAR_GERENTE_GERAL|' + process.ID_PROCESSO, context);
+    var acceptance = autCreateAcceptance_(actor, process, {
+      scopeType: 'PROCESSO', scopeId: process.ID_PROCESSO, scopeVersion: autProcessVersion_(process),
+      contentHash: autBuildAdministrativeHash_(process.ID_PROCESSO), decision: 'OK',
+      text: 'Declaro concluída a revisão do Gerente Administrativo e encaminho o processo à Gerência Geral.'
+    }, context);
+    var result = autMoveProcess_(actor, process, {
+      STATUS: 'APROVADO_GERENCIAL', FASE: 'GERENTE_GERAL', STATUS_TRAMITACAO: 'AGUARDANDO_GERENTE_GERAL',
+      ETAPA_ATUAL: 'GERENTE_GERAL', SETOR_ATUAL: 'GERENTE_GERAL', ANALISE_INICIADA_EM: ''
+    }, 'PROCESSO_ENVIADO_GERENTE_GERAL', recipient, payload.observation || 'Revisão administrativa gerencial concluída.', context);
+    autCommitRequest_(requestKey);
+    return autResult_({ sent: true, acceptanceId: acceptance.id, version: result.version, responsible: recipient.NOME });
+  } catch (err) { return autPublicError_(err); }
+  finally { try { lock.releaseLock(); } catch (ignore) {} }
+}
+
+function apiIniciarAnaliseGerenteGeral(token, payload, context) {
+  var lock = LockService.getScriptLock();
+  try {
+    var actor = autRequireAuth_(token, 'APROVACAO_GERAL');
+    payload = payload || {};
+    lock.waitLock(30000);
+    var process = autRequireProcess_(actor, payload.processId);
+    autAssertProcessMutable_(process);
+    autAssertExpectedVersion_(process, payload.expectedVersion);
+    autAssertCurrentResponsible_(actor, process);
+    autAssertActorRole_(actor, ['GERENTE_GERAL']);
+    autAssert_(String(process.STATUS_TRAMITACAO) === 'AGUARDANDO_GERENTE_GERAL',
+      'Esta análise da Gerência Geral já foi iniciada ou não está disponível.', 'INVALID_TRANSITION');
+    var requestKey = autClaimRequest_(actor, 'INICIAR_GERENTE_GERAL|' + process.ID_PROCESSO, context);
+    var result = autMoveProcess_(actor, process, {
+      STATUS: 'EM_ANALISE', FASE: 'GERENTE_GERAL', STATUS_TRAMITACAO: 'COM_GERENTE_GERAL',
+      ETAPA_ATUAL: 'GERENTE_GERAL', SETOR_ATUAL: 'GERENTE_GERAL', ANALISE_INICIADA_EM: autNow_()
+    }, 'ANALISE_GERENTE_GERAL_INICIADA', actor, payload.observation || 'Análise da Gerência Geral iniciada.', context);
+    autCommitRequest_(requestKey);
+    return autResult_({ started: true, version: result.version });
+  } catch (err) { return autPublicError_(err); }
+  finally { try { lock.releaseLock(); } catch (ignore) {} }
+}
+
+function apiEnviarAuditoria(token, payload, context) {
+  var lock = LockService.getScriptLock();
+  try {
+    var actor = autRequireAuth_(token, 'APROVACAO_GERAL');
+    payload = payload || {};
+    lock.waitLock(30000);
+    var process = autRequireProcess_(actor, payload.processId);
+    autAssertProcessMutable_(process);
+    autAssertExpectedVersion_(process, payload.expectedVersion);
+    autAssertCurrentResponsible_(actor, process);
+    autAssertActorRole_(actor, ['GERENTE_GERAL']);
+    autAssert_(String(process.STATUS_TRAMITACAO) === 'COM_GERENTE_GERAL',
+      'O processo não está em análise da Gerência Geral.', 'INVALID_TRANSITION');
     var administrative = autAdministrativeReadiness_(process);
     autAssert_(administrative.ready,
       'O processo mudou após a análise administrativa. Revise os dados, participantes, documentos e pendências antes de enviar à Auditoria.',
@@ -839,12 +912,12 @@ function apiEnviarAuditoria(token, payload, context) {
     var acceptance = autCreateAcceptance_(actor, process, {
       scopeType: 'PROCESSO', scopeId: process.ID_PROCESSO, scopeVersion: autProcessVersion_(process),
       contentHash: contentHash, decision: 'OK',
-      text: 'Declaro concluída a revisão gerencial e encaminho o processo para auditoria final.'
+      text: 'Declaro concluída a revisão da Gerência Geral e encaminho o processo para auditoria final.'
     }, context);
     var result = autMoveProcess_(actor, process, {
-      STATUS: 'APROVADO_GERENCIAL', FASE: 'AUDITORIA', STATUS_TRAMITACAO: 'AGUARDANDO_AUDITORIA',
+      STATUS: 'APROVADO_GERENTE_GERAL', FASE: 'AUDITORIA', STATUS_TRAMITACAO: 'AGUARDANDO_AUDITORIA',
       ETAPA_ATUAL: 'AUDITORIA', SETOR_ATUAL: 'AUDITORIA', ANALISE_INICIADA_EM: ''
-    }, 'PROCESSO_ENVIADO_AUDITORIA', recipient, payload.observation || 'Revisão gerencial concluída.', context);
+    }, 'PROCESSO_ENVIADO_AUDITORIA', recipient, payload.observation || 'Revisão da Gerência Geral concluída.', context);
     autCommitRequest_(requestKey);
     return autResult_({ sent: true, acceptanceId: acceptance.id, version: result.version, responsible: recipient.NOME });
   } catch (err) { return autPublicError_(err); }
@@ -1060,7 +1133,11 @@ function apiCriarAditivo(token, payload, context) {
 
 function autWorkflowSnapshot_(actor, process, includeDetails) {
   var isResponsible = String(process.ID_RESPONSAVEL || '') === String(actor.ID_USUARIO || '');
+  var executive = autIsProcessExecutive_(actor);
+  var canControl = isResponsible || executive;
+  var actorRole = String(actor.PERFIL || '');
   var state = String(process.STATUS_TRAMITACAO || 'COM_CORRETOR');
+  function actsAs(roles) { return executive || roles.indexOf(actorRole) >= 0; }
   var categories = includeDetails === false ? [] : AUTENTIKO.REVIEW_CATEGORIES.map(function(category) {
     var readiness = autCategoryReadiness_(process, category);
     var decision = autLatestChecklist_(process.ID_PROCESSO, category);
@@ -1071,17 +1148,45 @@ function autWorkflowSnapshot_(actor, process, includeDetails) {
     return readiness;
   });
   var actions = {
-    sendAdministrative: isResponsible && actor.PERFIL === 'CORRETOR' && ['COM_CORRETOR', 'DEVOLVIDO_CORRETOR'].indexOf(state) >= 0,
-    startAdministrative: isResponsible && actor.PERFIL === 'ASSISTENTE_ADMINISTRATIVO' && state === 'AGUARDANDO_ADMINISTRATIVO',
-    reviewDocuments: isResponsible && autHasPermission_(actor, 'DOCUMENTO_CONFERIR') && state !== 'CONCLUIDO',
-    approveAdministrative: isResponsible && actor.PERFIL === 'ASSISTENTE_ADMINISTRATIVO' && state === 'COM_ADMINISTRATIVO',
-    startManager: isResponsible && actor.PERFIL === 'GERENTE_ADMINISTRATIVO' && state === 'AGUARDANDO_GERENTE',
-    decideCategories: isResponsible && actor.PERFIL === 'GERENTE_ADMINISTRATIVO' && ['COM_GERENTE', 'CONTRATO_EM_PREPARACAO'].indexOf(state) >= 0,
-    sendAudit: isResponsible && actor.PERFIL === 'GERENTE_ADMINISTRATIVO' && ['COM_GERENTE', 'CONTRATO_EM_PREPARACAO'].indexOf(state) >= 0,
-    startAudit: isResponsible && actor.PERFIL === 'AUDITOR' && state === 'AGUARDANDO_AUDITORIA',
-    finalizeAudit: isResponsible && actor.PERFIL === 'AUDITOR' && state === 'COM_AUDITOR',
-    pend: isResponsible && ['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'AUDITOR'].indexOf(actor.PERFIL) >= 0 && state !== 'CONCLUIDO',
+    sendAdministrative: canControl && actsAs(['CORRETOR']) && ['COM_CORRETOR', 'DEVOLVIDO_CORRETOR'].indexOf(state) >= 0,
+    startAdministrative: canControl && actsAs(['ASSISTENTE_ADMINISTRATIVO']) && state === 'AGUARDANDO_ADMINISTRATIVO',
+    reviewDocuments: canControl && autHasPermission_(actor, 'DOCUMENTO_CONFERIR') && state !== 'CONCLUIDO',
+    approveAdministrative: canControl && actsAs(['ASSISTENTE_ADMINISTRATIVO']) && state === 'COM_ADMINISTRATIVO',
+    startManager: canControl && actsAs(['GERENTE_ADMINISTRATIVO']) && state === 'AGUARDANDO_GERENTE',
+    decideCategories: canControl && actsAs(['GERENTE_ADMINISTRATIVO']) && ['COM_GERENTE', 'CONTRATO_EM_PREPARACAO'].indexOf(state) >= 0,
+    sendGeneralManager: canControl && actsAs(['GERENTE_ADMINISTRATIVO']) && ['COM_GERENTE', 'CONTRATO_EM_PREPARACAO'].indexOf(state) >= 0,
+    startGeneralManager: canControl && actsAs(['GERENTE_GERAL']) && state === 'AGUARDANDO_GERENTE_GERAL',
+    sendAudit: canControl && actsAs(['GERENTE_GERAL']) && state === 'COM_GERENTE_GERAL',
+    startAudit: canControl && actsAs(['AUDITOR']) && state === 'AGUARDANDO_AUDITORIA',
+    finalizeAudit: canControl && actsAs(['AUDITOR']) && state === 'COM_AUDITOR',
+    pend: canControl && actsAs(['ASSISTENTE_ADMINISTRATIVO', 'GERENTE_ADMINISTRATIVO', 'GERENTE_GERAL', 'AUDITOR']) && state !== 'CONCLUIDO',
     createAddendum: String(process.STATUS) === 'FINALIZADO' && autHasPermission_(actor, 'ADITIVO_CRIAR')
+  };
+  var movementRows = autMovementRows_(process.ID_PROCESSO);
+  var latestMovement = movementRows.length ? movementRows[movementRows.length - 1] : null;
+  var wasReturned = !!(latestMovement && /DEVOLVIDO|PENDENCIA/.test(String(latestMovement.ACAO || '')));
+  var requiredRole = AUTENTIKO_WORKFLOW_ROLE_BY_STATE[state] || '';
+  var routing = {
+    symbol: state === 'CONCLUIDO' ? '■' : wasReturned ? '↩' : isResponsible ? '●' : executive ? '◎' : '→',
+    tone: state === 'CONCLUIDO' ? 'locked' : wasReturned ? 'returned' : isResponsible ? 'assigned' : 'oversight',
+    isResponsible: isResponsible,
+    executiveView: executive && !isResponsible,
+    responsibleId: process.ID_RESPONSAVEL || '',
+    responsibleName: process.RESPONSAVEL || '',
+    requiredRole: requiredRole,
+    requiredRoleLabel: autLabel_(requiredRole),
+    lastSender: process.ULTIMO_REMETENTE || '',
+    lastRecipient: process.ULTIMO_DESTINATARIO || '',
+    waitingSince: process.AGUARDANDO_DESDE || '',
+    message: state === 'CONCLUIDO'
+      ? 'Processo finalizado e protegido contra alterações.'
+      : wasReturned && isResponsible
+        ? 'Processo devolvido para você com pendência. Revise o motivo e faça a correção.'
+        : isResponsible
+          ? 'Este processo está com você e aguarda sua ação.'
+          : executive
+            ? 'Visão gerencial: o responsável atual é ' + (process.RESPONSAVEL || 'não informado') + '.'
+            : 'Processo atribuído a ' + (process.RESPONSAVEL || 'responsável não informado') + '.'
   };
   return {
     status: process.STATUS,
@@ -1094,10 +1199,12 @@ function autWorkflowSnapshot_(actor, process, includeDetails) {
     manifestHash: process.HASH_MANIFESTO || '',
     migrationStatus: process.MIGRACAO_STATUS || '',
     categories: categories,
+    routing: routing,
     actions: actions,
     recipients: {
       administrative: actions.sendAdministrative ? autWorkflowUsersByRole_('ASSISTENTE_ADMINISTRATIVO') : [],
       manager: actions.approveAdministrative ? autWorkflowUsersByRole_('GERENTE_ADMINISTRATIVO') : [],
+      generalManager: actions.sendGeneralManager ? autWorkflowUsersByRole_('GERENTE_GERAL') : [],
       auditor: actions.sendAudit ? autWorkflowUsersByRole_('AUDITOR') : []
     }
   };

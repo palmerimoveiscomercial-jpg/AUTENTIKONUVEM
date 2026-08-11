@@ -59,6 +59,8 @@
     documentFetches: new Map(),
     thumbnailMisses: new Map(),
     imageEncoderSupport: new Map(),
+    processDraftDirty: false,
+    processDraftTimer: 0,
     context: {
       device: {
         userAgent: navigator.userAgent,
@@ -90,7 +92,7 @@
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? esc(value) : date.toLocaleString('pt-BR', {dateStyle:'short', timeStyle:'short'});
   };
-  const roleText = value => ({DESENVOLVEDOR:'Desenvolvedor',ADMINISTRADOR:'Administrador',GERENTE_ADMINISTRATIVO:'Gerente administrativo',ASSISTENTE_ADMINISTRATIVO:'Administrativo',AUDITOR:'Auditor',CORRETOR:'Corretor'}[value] || value);
+  const roleText = value => ({DESENVOLVEDOR:'Desenvolvedor',ADMINISTRADOR:'Administrador',GERENTE_GERAL:'Gerente geral',GERENTE_ADMINISTRATIVO:'Gerente administrativo',ASSISTENTE_ADMINISTRATIVO:'Administrativo',AUDITOR:'Auditor',CORRETOR:'Corretor'}[value] || value);
   const statusText = value => String(value || '').replace(/_/g, ' ').toLowerCase().replace(/(^|\s)\S/g, m => m.toUpperCase());
   const hasPermission = permission => state.bootstrap?.user?.permissions?.includes('*') || state.bootstrap?.user?.permissions?.includes(permission);
   const API_TIMEOUTS = {
@@ -121,6 +123,7 @@
     thumbnailTtlMs: 7 * 24 * 60 * 60 * 1000,
     processTabTtlMs: 5 * 60 * 1000
   });
+  const SHORT_PROCESS_DRAFT_TTL_MS = 30 * 60 * 1000;
 
   function readCookie(name) {
     const prefix = `${encodeURIComponent(name)}=`;
@@ -444,6 +447,83 @@
     return form;
   }
 
+  function shortProcessDraftOwner() {
+    return String(state.bootstrap?.user?.id || 'anonymous');
+  }
+
+  function shortProcessDraftPointerKey() {
+    return `autentiko_process_draft_active:${shortProcessDraftOwner()}`;
+  }
+
+  function shortProcessDraftKey(type) {
+    return `autentiko_process_draft:${shortProcessDraftOwner()}:${String(type || '')}`;
+  }
+
+  function updateShortProcessDraftStatus(message = '', saved = false) {
+    const status = $('#process-draft-status');
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle('hidden', !message);
+    status.classList.toggle('saved', saved);
+  }
+
+  function readShortProcessDraft(type = '') {
+    try {
+      const selectedType = type || sessionStorage.getItem(shortProcessDraftPointerKey()) || '';
+      if (!selectedType) return null;
+      const key = shortProcessDraftKey(selectedType);
+      const draft = JSON.parse(sessionStorage.getItem(key) || 'null');
+      if (!draft || draft.owner !== shortProcessDraftOwner() || Date.now() - Number(draft.savedAt || 0) > SHORT_PROCESS_DRAFT_TTL_MS) {
+        sessionStorage.removeItem(key);
+        if (!type) sessionStorage.removeItem(shortProcessDraftPointerKey());
+        return null;
+      }
+      return draft;
+    } catch (ignoreDraftRead) { return null; }
+  }
+
+  function saveShortProcessDraft() {
+    const type = $('#new-process-type')?.value || '';
+    if (!type || activeModalId() !== 'process-modal') return null;
+    const draft = {
+      owner: shortProcessDraftOwner(),
+      type,
+      data: formObject($('#dynamic-process-form')),
+      incomeAccepted: Boolean($('#income-acceptance-check')?.checked),
+      savedAt: Date.now()
+    };
+    try {
+      sessionStorage.setItem(shortProcessDraftKey(type), JSON.stringify(draft));
+      sessionStorage.setItem(shortProcessDraftPointerKey(), type);
+      state.processDraftDirty = true;
+      updateShortProcessDraftStatus(`Rascunho temporário salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}. Válido por 30 minutos nesta aba.`, true);
+      return draft;
+    } catch (ignoreDraftWrite) {
+      updateShortProcessDraftStatus('O navegador bloqueou a memória temporária. Mantenha esta janela aberta até salvar.', false);
+      return null;
+    }
+  }
+
+  function scheduleShortProcessDraftSave() {
+    if (activeModalId() !== 'process-modal') return;
+    state.processDraftDirty = true;
+    updateShortProcessDraftStatus('Alterações ainda não enviadas — salvando rascunho temporário...', false);
+    clearTimeout(state.processDraftTimer);
+    state.processDraftTimer = setTimeout(saveShortProcessDraft, 300);
+  }
+
+  function clearShortProcessDraft(type = '') {
+    const selectedType = type || $('#new-process-type')?.value || sessionStorage.getItem(shortProcessDraftPointerKey()) || '';
+    try {
+      if (selectedType) sessionStorage.removeItem(shortProcessDraftKey(selectedType));
+      sessionStorage.removeItem(shortProcessDraftPointerKey());
+    } catch (ignoreDraftClear) {}
+    clearTimeout(state.processDraftTimer);
+    state.processDraftTimer = 0;
+    state.processDraftDirty = false;
+    updateShortProcessDraftStatus('', false);
+  }
+
   let toastTimer;
   function toast(message, type = '') {
     const el = $('#toast');
@@ -725,10 +805,19 @@
   }
 
   function closeModal(force = false) {
+    const currentModal = activeModalId();
     const passwordModalOpen = !$('#password-modal')?.classList.contains('hidden');
     if (state.forcePasswordChange && passwordModalOpen && !force) {
       toast('Troque a senha temporária para continuar.', 'error');
       return false;
+    }
+    if (!force && currentModal === 'process-modal' && state.processDraftDirty) {
+      saveShortProcessDraft();
+      if (!confirm('Existem dados ainda não enviados. O rascunho ficará disponível nesta aba por 30 minutos. Deseja fechar a ficha?')) return false;
+    }
+    if (!force && state.currentProcess && ['workflow-modal','participant-modal','proposal-modal','proposal-accept-modal'].includes(currentModal)) {
+      openModal('detail-modal');
+      return true;
     }
     resetPreviewState();
     clearPendingDocumentFiles();
@@ -742,12 +831,24 @@
     return true;
   }
 
-  function openNewProcess() {
+  async function openNewProcess() {
     if (!resetForm('#process-form')) return;
     $('#dynamic-process-form').innerHTML = '<div class="empty-state">Selecione o tipo de processo para carregar o formulário.</div>';
     $('#income-acceptance-panel').classList.add('hidden');
     $('#income-acceptance-check').checked = false;
     openModal('process-modal');
+    const draft = readShortProcessDraft();
+    if (draft) {
+      $('#new-process-type').value = draft.type;
+      await loadDynamicForm(draft.type, draft.data || {});
+      $('#income-acceptance-check').checked = Boolean(draft.incomeAccepted);
+      state.processDraftDirty = true;
+      updateShortProcessDraftStatus(`Rascunho recuperado, salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}.`, true);
+      updateIncomeAffordability();
+    } else {
+      state.processDraftDirty = false;
+      updateShortProcessDraftStatus('', false);
+    }
   }
 
   async function loadDynamicForm(type, values = {}) {
@@ -1002,7 +1103,6 @@
       id:`temp-${Date.now()}`,protocol:'SALVANDO',clientName:data.cliente_nome,typeLabel:state.bootstrap.processTypes.find(item=>item.value===type)?.label,
       status:'PENDENTE',responsible:data.responsavel_processo || state.bootstrap.user.name,updatedAt:new Date().toISOString(),clientCpf:data.cliente_cpf,propertyAddress:data.imovel_endereco
     };
-    closeModal();
     const target = $('#dashboard-processes');
     const original = state.processes.slice();
     renderProcesses(target, [temp, ...original]);
@@ -1010,6 +1110,8 @@
     setBusy(button, true, 'Salvando...');
     try {
       const result = await api('apiCriarProcesso', state.token, {type,data}, state.context);
+      clearShortProcessDraft(type);
+      closeModal(true);
       toast(`Processo ${result.process.protocol} criado. Agora envie os documentos.`, 'success');
       await Promise.all([
         loadProcesses('dashboard'),
@@ -1231,7 +1333,9 @@
     if (actions.startAdministrative) buttons.push(`<button class="btn primary compact${extraClass}" data-workflow-direct="apiIniciarAnaliseAdministrativa">Iniciar análise administrativa</button>`);
     if (actions.approveAdministrative) buttons.push(`<button class="btn success compact${extraClass}" data-workflow-action="approveAdministrative">✓ OK administrativo e avançar</button>`);
     if (actions.startManager) buttons.push(`<button class="btn primary compact${extraClass}" data-workflow-direct="apiIniciarAnaliseGerencial">Iniciar análise gerencial</button>`);
-    if (actions.sendAudit) buttons.push(`<button class="btn success compact${extraClass}" data-workflow-action="sendAudit">✓ OK gerencial e avançar</button>`);
+    if (actions.sendGeneralManager) buttons.push(`<button class="btn success compact${extraClass}" data-workflow-action="sendGeneralManager">✓ OK e enviar ao Gerente Geral</button>`);
+    if (actions.startGeneralManager) buttons.push(`<button class="btn primary compact${extraClass}" data-workflow-direct="apiIniciarAnaliseGerenteGeral">Iniciar análise do Gerente Geral</button>`);
+    if (actions.sendAudit) buttons.push(`<button class="btn success compact${extraClass}" data-workflow-action="sendAudit">✓ OK do Gerente Geral e avançar</button>`);
     if (actions.startAudit) buttons.push(`<button class="btn primary compact${extraClass}" data-workflow-direct="apiIniciarAuditoria">Iniciar auditoria</button>`);
     if (actions.finalizeAudit) buttons.push(`<button class="btn success compact${extraClass}" data-workflow-action="finalizeAudit">✓ OK final e concluir</button>`);
     if (actions.pend) buttons.push(`<button class="btn warning compact${extraClass}" data-workflow-action="pend">Devolver com pendência</button>`);
@@ -1265,7 +1369,8 @@
     if (capabilities.pending && !locked) tools.push('<button type="button" class="process-action-tool" data-jump-detail-section="pending"><span>!</span>Pendência</button>');
 
     const primary = renderWorkflowActionButtons(detail, 'header');
-    return `<div class="process-action-state ${locked?'locked':''}"><span class="process-action-light"></span><div><small>ETAPA ATUAL</small><strong>${esc(statusText(workflow.stage || detail.process.currentStage))}</strong><span>${esc(statusText(workflow.state || detail.process.workflowStatus))} · v${esc(workflow.version || detail.process.version)}</span></div></div>
+    const routing = workflow.routing || {};
+    return `<div class="process-action-state ${locked?'locked':''}" title="${esc(routing.message || '')}"><span class="process-routing-symbol ${esc(routing.tone || '')}">${esc(routing.symbol || '●')}</span><div><small>ETAPA ATUAL</small><strong>${esc(statusText(workflow.stage || detail.process.currentStage))}</strong><span>${esc(routing.message || `${statusText(workflow.state || detail.process.workflowStatus)} · v${workflow.version || detail.process.version}`)}</span></div></div>
       <div class="process-action-scroll"><div class="process-action-primary">${primary.join('') || '<span class="process-action-readonly">Processo em modo de consulta</span>'}</div><span class="process-action-separator"></span><div class="process-action-tools">${tools.join('')}</div></div>`;
   }
 
@@ -1304,12 +1409,13 @@
       {key:'DOCUMENTACAO', label:'Corretor — documentos', description:'Uploads obrigatórios e proposta'},
       {key:'ADMINISTRATIVO', label:'Administrativo', description:'Conferência e tratamento de pendências'},
       {key:'GERENCIAL', label:'Gerente administrativo', description:'Sete OKs, negociação e aprovação'},
+      {key:'GERENTE_GERAL', label:'Gerente geral', description:'Validação hierárquica final da gerência'},
       {key:'CONTRATO', label:'Contratos', description:'Emissão, assinatura e conferência'},
       {key:'AUDITORIA', label:'Auditoria', description:'Revisão final e manifesto de integridade'},
       {key:'FINALIZACAO', label:'Finalizado', description:'Processo bloqueado e imutável'}
     ];
     const rawIndex = phases.findIndex(phase => phase.key === p.phase);
-    const stageFallback = {CORRETOR:1, ADMINISTRATIVO:2, GERENCIAL:3, AUDITORIA:5, FINALIZACAO:6};
+    const stageFallback = {CORRETOR:1, ADMINISTRATIVO:2, GERENCIAL:3, GERENTE_GERAL:4, AUDITORIA:6, FINALIZACAO:7};
     const currentIndex = rawIndex >= 0 ? rawIndex : (stageFallback[p.currentStage] ?? 0);
     const finalized = p.status === 'FINALIZADO';
     const cards = phases.map((phase, index) => {
@@ -1833,10 +1939,12 @@
     const auditReady = managerReady && Boolean(administrative.ready) && openPending === 0;
     if (actions.sendAdministrative) action = `<button class="btn success process-ok-main" data-workflow-action="sendAdministrative" ${registrationReady?'':'disabled'}>✓ Dar OK e encaminhar ao Administrativo</button>`;
     else if (actions.approveAdministrative) action = `<button class="btn success process-ok-main" data-workflow-action="approveAdministrative" ${administrativeReady?'':'disabled'}>✓ Dar OK administrativo e avançar</button>`;
-    else if (actions.sendAudit) action = `<button class="btn success process-ok-main" data-workflow-action="sendAudit" ${managerReady?'':'disabled'}>✓ Dar OK gerencial e enviar à Auditoria</button>`;
+    else if (actions.sendGeneralManager) action = `<button class="btn success process-ok-main" data-workflow-action="sendGeneralManager" ${managerReady?'':'disabled'}>✓ Dar OK e enviar ao Gerente Geral</button>`;
+    else if (actions.sendAudit) action = `<button class="btn success process-ok-main" data-workflow-action="sendAudit" ${managerReady?'':'disabled'}>✓ Dar OK do Gerente Geral e enviar à Auditoria</button>`;
     else if (actions.finalizeAudit) action = `<button class="btn success process-ok-main" data-workflow-action="finalizeAudit" ${auditReady?'':'disabled'}>✓ Dar OK final e concluir processo</button>`;
     else if (actions.startAdministrative) action = '<button class="btn primary process-ok-main" data-workflow-direct="apiIniciarAnaliseAdministrativa">Iniciar análise administrativa</button>';
     else if (actions.startManager) action = '<button class="btn primary process-ok-main" data-workflow-direct="apiIniciarAnaliseGerencial">Iniciar análise gerencial</button>';
+    else if (actions.startGeneralManager) action = '<button class="btn primary process-ok-main" data-workflow-direct="apiIniciarAnaliseGerenteGeral">Iniciar análise do Gerente Geral</button>';
     else if (actions.startAudit) action = '<button class="btn primary process-ok-main" data-workflow-direct="apiIniciarAuditoria">Iniciar auditoria</button>';
     return `<section class="process-ok-panel"><div class="process-ok-heading"><div><p class="eyebrow">CENTRAL DE CONFIRMAÇÕES</p><h3>OK do processo</h3><p>O backend valida todos os requisitos novamente antes de permitir a próxima fase.</p></div>${action || '<span class="process-action-readonly">Aguardando a etapa responsável</span>'}</div>
       <div class="process-ok-checks">${checks.map(item => `<article class="${item.ok?'ok':'pending'}"><span>${item.ok?'✓':'!'}</span><div><strong>${esc(item.label)}</strong><small>${esc(item.detail)}</small></div></article>`).join('')}</div></section>`;
@@ -1845,8 +1953,9 @@
   function renderWorkflowActions(detail) {
     const workflow = detail.workflow || {};
     const buttons = renderWorkflowActionButtons(detail);
+    const routing = workflow.routing || {};
     return `<div class="workflow-state-card ${workflow.locked?'locked':''}">
-      <div><p class="eyebrow">FLUXO CONTROLADO</p><h4>${esc(statusText(workflow.stage || detail.process.currentStage))}</h4><p>${esc(statusText(workflow.state || detail.process.workflowStatus))} · versão ${esc(workflow.version || detail.process.version)}</p>${workflow.locked?`<small>Bloqueado em ${dateText(workflow.lockedAt)} por ${esc(workflow.lockedBy || '—')} · manifesto ${esc(String(workflow.manifestHash || '').slice(0,16))}…</small>`:''}</div>
+      <div><p class="eyebrow">FLUXO CONTROLADO</p><h4>${esc(statusText(workflow.stage || detail.process.currentStage))}</h4><p>${esc(statusText(workflow.state || detail.process.workflowStatus))} · versão ${esc(workflow.version || detail.process.version)}</p><div class="workflow-routing-notice"><span class="process-routing-symbol ${esc(routing.tone || '')}">${esc(routing.symbol || '●')}</span><strong>${esc(routing.message || `Responsável: ${detail.process.responsible || '—'}`)}</strong></div>${workflow.locked?`<small>Bloqueado em ${dateText(workflow.lockedAt)} por ${esc(workflow.lockedBy || '—')} · manifesto ${esc(String(workflow.manifestHash || '').slice(0,16))}…</small>`:''}</div>
       <div class="workflow-action-buttons">${buttons.join('') || '<span class="muted">Nenhuma ação disponível para seu perfil nesta etapa.</span>'}</div>
     </div>`;
   }
@@ -2127,6 +2236,7 @@
     const definitions = {
       sendAdministrative: {title:'Encaminhar ao Administrativo', recipients:detail.workflow?.recipients?.administrative || [], recipient:true, scope:false},
       approveAdministrative: {title:'Aprovar e encaminhar ao Gerente Administrativo', recipients:detail.workflow?.recipients?.manager || [], recipient:true, scope:false},
+      sendGeneralManager: {title:'Aprovar e encaminhar ao Gerente Geral', recipients:detail.workflow?.recipients?.generalManager || [], recipient:true, scope:false},
       sendAudit: {title:'Encaminhar para Auditoria', recipients:detail.workflow?.recipients?.auditor || [], recipient:true, scope:false},
       pend: {title:'Devolver com pendência', recipients:[], recipient:false, scope:true},
       finalizeAudit: {title:'Finalizar e bloquear permanentemente', recipients:[], recipient:false, scope:false}
@@ -2161,6 +2271,7 @@
     const definitions = {
       sendAdministrative:['apiEnviarAdministrativo',{userId:data.recipientId,observation:data.observation}],
       approveAdministrative:['apiAprovarAdministrativo',{userId:data.recipientId,observation:data.observation}],
+      sendGeneralManager:['apiEnviarGerenteGeral',{userId:data.recipientId,observation:data.observation}],
       sendAudit:['apiEnviarAuditoria',{userId:data.recipientId,observation:data.observation}],
       pend:['apiPendenciarFluxo',{targetType:data.scope,documentId:data.scope==='DOCUMENTO'?data.documentId:'',description:data.observation,title:data.scope==='DOCUMENTO'?'Pendência documental':'Pendência no processo'}],
       finalizeAudit:['apiFinalizarAuditoria',{observation:data.observation}]
@@ -2171,9 +2282,9 @@
     if (action === 'finalizeAudit' && !confirm('Esta ação é permanente. O processo ficará imutável e somente aditivos poderão corrigi-lo. Deseja continuar?')) return;
     setBusy(button,true,'Processando...');
     try {
-      await api(definition[0],state.token,processMutationPayload(definition[1]),state.context);
+      const result=await api(definition[0],state.token,processMutationPayload(definition[1]),state.context);
       openModal('detail-modal');
-      toast('Etapa registrada com aceite eletrônico.','success');
+      toast(result?.responsible?`Etapa registrada. Processo encaminhado para ${result.responsible}.`:(result?.returnedTo?`Processo devolvido para ${result.returnedTo}.`:'Etapa registrada com aceite eletrônico.'),'success');
       await refreshDetail(['review','documents']);
     } catch(error) { toast(error.message,'error'); }
     finally { if(button.isConnected)setBusy(button,false); }
@@ -3882,16 +3993,29 @@
     $('#change-password-btn').addEventListener('click',()=>openPasswordModal(false));
     $$('.nav-btn').forEach(btn=>btn.addEventListener('click',()=>showView(btn.dataset.view)));
     $('#new-process-btn').addEventListener('click',openNewProcess);$$('.js-new-process').forEach(btn=>btn.addEventListener('click',openNewProcess));
-    $('#new-process-type').addEventListener('change',event=>loadDynamicForm(event.target.value));
-    $('#dynamic-process-form').addEventListener('change',()=>{updateConditionalFields();updateIncomeAffordability();});
-    $('#dynamic-process-form').addEventListener('input',event=>{if(event.target.dataset.mask)maskValue(event.target);});
+    $('#new-process-type').addEventListener('change',async event=>{
+      const draft=readShortProcessDraft(event.target.value);
+      await loadDynamicForm(event.target.value,draft?.data||{});
+      $('#income-acceptance-check').checked=Boolean(draft?.incomeAccepted);
+      state.processDraftDirty=Boolean(draft);
+      if(draft)updateShortProcessDraftStatus(`Rascunho recuperado, salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}.`,true);
+      else{updateShortProcessDraftStatus('',false);scheduleShortProcessDraftSave();}
+    });
+    $('#dynamic-process-form').addEventListener('change',()=>{updateConditionalFields();updateIncomeAffordability();scheduleShortProcessDraftSave();});
+    $('#dynamic-process-form').addEventListener('input',event=>{if(event.target.dataset.mask)maskValue(event.target);scheduleShortProcessDraftSave();});
+    $('#income-acceptance-check').addEventListener('change',scheduleShortProcessDraftSave);
     $('#process-form').addEventListener('submit',submitProcess);
     $('#dashboard-filter-btn').addEventListener('click',()=>loadProcesses('dashboard'));$('#process-filter-btn').addEventListener('click',()=>loadProcesses('processes'));
     ['dashboard-search','process-search'].forEach(id=>$('#'+id).addEventListener('keydown',event=>{if(event.key==='Enter')loadProcesses(id==='dashboard-search'?'dashboard':'processes');}));
     $$('.js-close-modal').forEach(btn=>btn.addEventListener('click',()=>closeModal()));
-    $('#modal-backdrop').addEventListener('click',event=>{if(event.target===event.currentTarget){if(activeModalId()==='preview-modal')closePreview();else if(activeModalId()==='forward-modal')closeForward();else closeModal();}});
+    $('#modal-backdrop').addEventListener('click',event=>{if(event.target===event.currentTarget)toast('Esta janela não fecha ao clicar fora. Use o botão × ou Cancelar para não perder seu trabalho.');});
     document.addEventListener('keydown',event=>{
-      if(event.key==='Escape'){if(activeModalId()==='preview-modal')closePreview();else if(activeModalId()==='forward-modal')closeForward();else closeModal();return;}
+      if(event.key==='Escape'){
+        if(activeModalId()==='preview-modal')closePreview();
+        else if(activeModalId()==='forward-modal')closeForward();
+        else toast('Use o botão × ou Cancelar para fechar esta janela com segurança.');
+        return;
+      }
       const zone=event.target.closest?.('[data-document-dropzone]');
       if(zone&&(event.key==='Enter'||event.key===' ')){event.preventDefault();$('.document-file-input',zone)?.click();}
       const visualPreview=event.target.closest?.('[data-preview-doc]');
@@ -4006,6 +4130,12 @@
       const editDoc=event.target.closest('[data-edit-doc]');if(editDoc)return openDocModal(editDoc.dataset.editDoc);
       const editField=event.target.closest('[data-edit-field]');if(editField)return openFieldModal(editField.dataset.editField);
       const editModel=event.target.closest('[data-edit-contract-model]');if(editModel)return editContractModel(editModel.dataset.editContractModel);
+    });
+    window.addEventListener('beforeunload',event=>{
+      if(!state.processDraftDirty&&state.uploadWorkers===0)return;
+      saveShortProcessDraft();
+      event.preventDefault();
+      event.returnValue='';
     });
   }
 

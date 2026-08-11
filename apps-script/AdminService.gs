@@ -4,8 +4,9 @@ function autRoleRank_(role) {
     ASSISTENTE_ADMINISTRATIVO: 2,
     AUDITOR: 3,
     GERENTE_ADMINISTRATIVO: 4,
-    ADMINISTRADOR: 5,
-    DESENVOLVEDOR: 6
+    GERENTE_GERAL: 5,
+    ADMINISTRADOR: 6,
+    DESENVOLVEDOR: 7
   }[role] || 0;
 }
 

@@ -399,6 +399,21 @@ check('ações visuais respeitam a responsabilidade atual do processo', () => {
   assert.doesNotMatch(scriptsHtml, /Informe o ID da evidência conferida/);
 });
 
+check('hierarquia gerencial, sinal de roteamento e rascunho protegido', () => {
+  assert.match(serverSource, /GERENTE_GERAL/);
+  assert.match(serverSource, /function apiEnviarGerenteGeral/);
+  assert.match(serverSource, /function apiIniciarAnaliseGerenteGeral/);
+  assert.match(serverSource, /AGUARDANDO_GERENTE_GERAL/);
+  assert.match(serverSource, /function autIsProcessExecutive_/);
+  assert.match(serverSource, /routing:\s*routing/);
+  assert.match(scriptsHtml, /sendGeneralManager/);
+  assert.match(scriptsHtml, /SHORT_PROCESS_DRAFT_TTL_MS = 30 \* 60 \* 1000/);
+  assert.match(scriptsHtml, /function saveShortProcessDraft/);
+  assert.match(scriptsHtml, /function readShortProcessDraft/);
+  assert.match(scriptsHtml, /Esta janela não fecha ao clicar fora/);
+  assert.match(indexHtml, /id="process-draft-status"/);
+});
+
 check('correções preventivas de desempenho, e-mail, privacidade e transições', () => {
   assert.match(serverSource, /var AUTENTIKO_DB_INSTANCE_\s*=\s*null/);
   assert.match(serverSource, /if \(!AUTENTIKO_DB_INSTANCE_\)/);
