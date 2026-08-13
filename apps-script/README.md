@@ -1,6 +1,9 @@
 # Apps Script
 
-Fonte do AUTENTIKO 2.2.0. O arquivo `.clasp.json` real não é versionado.
+Fonte do AUTENTIKO 2.5.1. O arquivo `.clasp.json` real não é versionado.
+
+A versão 2.5.1 mantém a Carta de Clientes deduplicada por CPF/CNPJ, a base de imóveis,
+autopreenchimento assistido e o processo de Captação e Homologação de Imóvel.
 
 Antes de publicar:
 
@@ -10,3 +13,4 @@ Antes de publicar:
 4. execute `node tests/smoke.mjs`;
 5. mantenha `MEDIA_CLOUD_ENABLED=NAO` até Vercel e Supabase estarem validados;
 6. nunca grave `AUT_MEDIA_SIGNING_SECRET` no código: use Script Properties.
+7. após o primeiro setup da 2.5.1, execute `migrarBaseCadastros` uma vez para consolidar os processos legados.

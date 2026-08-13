@@ -171,6 +171,39 @@ function autUpdateRow_(name, rowNumber, patch) {
   });
 }
 
+function autPatchRows_(name, rowNumbers, patch) {
+  if (!rowNumbers || !rowNumbers.length || !patch) return;
+  return autWithScriptLock_(function() {
+    var sheet = autSheet_(name);
+    var headers = autHeaders_(sheet);
+    var numbers = Array.from(new Set(rowNumbers.map(Number).filter(function(value) {
+      return isFinite(value) && value >= 2 && value <= sheet.getLastRow();
+    }))).sort(function(a, b) { return a - b; });
+    if (!numbers.length) return;
+    var groups = [];
+    var start = numbers[0];
+    var end = start;
+    for (var index = 1; index < numbers.length; index++) {
+      if (numbers[index] === end + 1) end = numbers[index];
+      else {
+        groups.push({ start: start, count: end - start + 1 });
+        start = end = numbers[index];
+      }
+    }
+    groups.push({ start: start, count: end - start + 1 });
+    groups.forEach(function(group) {
+      var range = sheet.getRange(group.start, 1, group.count, headers.length);
+      var values = range.getValues();
+      values.forEach(function(row) {
+        headers.forEach(function(header, column) {
+          if (Object.prototype.hasOwnProperty.call(patch, header)) row[column] = autSafeCell_(patch[header]);
+        });
+      });
+      range.setValues(values);
+    });
+  });
+}
+
 function autUpsert_(name, key, obj) {
   return autWithScriptLock_(function() {
     var found = autFind_(name, key, obj[key]);

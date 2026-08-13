@@ -47,3 +47,22 @@ export const statusRequestSchema = z.object({
 export const retryRequestSchema = z.object({
   ticket: z.string().min(20)
 });
+
+export const auditAnchorTokenSchema = z.object({
+  kind: z.literal('audit-anchor'),
+  iss: z.literal('autentiko-apps-script'),
+  source: z.literal('APPS_SCRIPT_SHEETS'),
+  sourceSequence: z.number().int().nonnegative(),
+  recordCount: z.number().int().nonnegative(),
+  chainHash: z.string().regex(/^(?:[a-f0-9]{64})?$/i),
+  appVersion: z.string().min(1).max(32),
+  actorId: z.string().min(1).max(128),
+  requestId: z.string().regex(/^[A-Za-z0-9._:-]{8,128}$/),
+  signedAt: z.string().min(20).max(64),
+  iat: z.number().int().positive(),
+  exp: z.number().int().positive()
+});
+
+export const auditAnchorRequestSchema = z.object({
+  token: z.string().min(20)
+});

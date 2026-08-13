@@ -134,3 +134,73 @@ function apiVerificarIntegridadeAuditoria(token) {
     return autResult_(result);
   } catch (err) { return autPublicError_(err); }
 }
+
+function autAuditAnchorPayload_(actor, requestId) {
+  var rows = autRows_('AUDITORIA').sort(function(a, b) { return Number(a.SEQUENCIA || 0) - Number(b.SEQUENCIA || 0); });
+  var last = rows.length ? rows[rows.length - 1] : {};
+  var nowSeconds = Math.floor(Date.now() / 1000);
+  return {
+    kind: 'audit-anchor',
+    iss: 'autentiko-apps-script',
+    source: 'APPS_SCRIPT_SHEETS',
+    sourceSequence: Number(last.SEQUENCIA || 0),
+    recordCount: rows.length,
+    chainHash: String(last.HASH_ATUAL || ''),
+    appVersion: AUTENTIKO.APP_VERSION,
+    actorId: String(actor && actor.ID_USUARIO || 'SISTEMA'),
+    requestId: String(requestId || Utilities.getUuid()),
+    signedAt: autNow_(),
+    iat: nowSeconds,
+    exp: nowSeconds + 120
+  };
+}
+
+function autAnchorAuditRoot_(actor, requestId) {
+  autAssert_(mediaCloudEnabled_(), 'A nuvem documental ainda não está ativa.', 'FEATURE_DISABLED');
+  autAssert_(autNormalize_(autConfigMap_().AUDIT_ANCHOR_ENABLED) === 'SIM',
+    'A ancoragem externa da auditoria ainda não está ativa.', 'FEATURE_DISABLED');
+  var baseUrl = mediaApiBaseUrl_();
+  autAssert_(baseUrl, 'A URL da API de mídia não foi configurada.', 'MEDIA_CONFIG_REQUIRED');
+  var payload = autAuditAnchorPayload_(actor, requestId);
+  var response = UrlFetchApp.fetch(baseUrl + '/api/v1/audit/anchor', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    payload: JSON.stringify({ token: mediaSignCompactPayload_(payload) }),
+    headers: { 'Cache-Control': 'no-store' }
+  });
+  var status = response.getResponseCode();
+  var body = autJsonParse_(response.getContentText(), {});
+  autAssert_(status >= 200 && status < 300 && body.ok !== false,
+    'Não foi possível ancorar a auditoria na nuvem.', 'AUDIT_ANCHOR_FAILED');
+  PropertiesService.getScriptProperties().setProperties({
+    AUT_LAST_AUDIT_ANCHOR_AT: payload.signedAt,
+    AUT_LAST_AUDIT_ANCHOR_HASH: payload.chainHash,
+    AUT_LAST_AUDIT_ANCHOR_SEQUENCE: String(payload.sourceSequence)
+  }, false);
+  return { anchored: true, sequence: payload.sourceSequence, records: payload.recordCount, rootHash: payload.chainHash };
+}
+
+function apiAncorarAuditoria(token, requestId) {
+  try {
+    var actor = autRequireAuth_(token, 'AUDITORIA_VER');
+    var result = autAnchorAuditRoot_(actor, requestId);
+    autAudit_(actor, 'AUDITORIA_ANCORADA_EXTERNAMENTE', 'SISTEMA', AUTENTIKO.APP_NAME, {
+      sequenciaAncorada: result.sequence, registros: result.records, hashRaiz: result.rootHash
+    }, { requestId: requestId });
+    return autResult_(result);
+  } catch (err) { return autPublicError_(err); }
+}
+
+function auditAnchorScheduled() {
+  if (!mediaCloudEnabled_() || autNormalize_(autConfigMap_().AUDIT_ANCHOR_ENABLED) !== 'SIM') return;
+  autAnchorAuditRoot_({ ID_USUARIO: 'SISTEMA', NOME: 'SISTEMA', PERFIL: 'SISTEMA' }, 'anchor-' + Utilities.getUuid());
+}
+
+function instalarGatilhoAncoragemAuditoria() {
+  var interval = Number(autConfigMap_().AUDIT_ANCHOR_INTERVAL_MINUTES || 15);
+  interval = [1, 5, 10, 15, 30].indexOf(interval) >= 0 ? interval : 15;
+  ScriptApp.getProjectTriggers().filter(function(trigger) {
+    return trigger.getHandlerFunction() === 'auditAnchorScheduled';
+  }).forEach(function(trigger) { ScriptApp.deleteTrigger(trigger); });
+  ScriptApp.newTrigger('auditAnchorScheduled').timeBased().everyMinutes(interval).create();
+  return { ok: true, intervalMinutes: interval };
+}

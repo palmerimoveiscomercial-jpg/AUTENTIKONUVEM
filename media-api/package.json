@@ -2,7 +2,7 @@
   "name": "@autentiko/media-api",
   "private": true,
   "type": "module",
-  "version": "2.2.0",
+  "version": "2.5.0",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

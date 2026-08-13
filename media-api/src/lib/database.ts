@@ -32,22 +32,39 @@ export async function consumeTicket(ticket: MediaTicket, eventType: string): Pro
 export async function registerCompletedMedia(ticket: MediaTicket, objects: StoredObject[]): Promise<void> {
   const original = objects.find((item) => item.role === 'original');
   if (!original) throw new ApiError(400, 'ORIGINAL_REQUIRED', 'O arquivo original não foi informado.');
-  const client = supabaseAdmin();
-  const {error: documentError} = await client.from('media_documents').upsert({
+  const needsOptimization = original.mimeType === 'application/pdf' &&
+    (original.size > 4 * 1024 * 1024 || !objects.some((item) => item.role === 'thumbnail'));
+  const jobs: Array<Record<string, unknown>> = [{
     document_id: ticket.documentId,
     process_id: ticket.processId,
     version: ticket.version,
-    mime_type: original.mimeType,
-    size_bytes: original.size,
-    sha256: original.sha256,
-    media_status: 'READY',
-    sync_state: 'STORAGE_READY',
-    updated_at: new Date().toISOString()
-  }, {onConflict: 'document_id,version'});
-  if (documentError) throw new ApiError(503, 'DATABASE_UNAVAILABLE', 'Não foi possível registrar o documento.');
-
-  for (const object of objects) {
-    const {error} = await client.from('media_objects').upsert({
+    job_type: 'SYNC_DRIVE',
+    provider: 'LOCAL',
+    next_attempt_at: new Date().toISOString(),
+    metadata: {direction: 'SUPABASE_TO_DRIVE'}
+  }];
+  if (needsOptimization) {
+    jobs.push({
+      document_id: ticket.documentId,
+      process_id: ticket.processId,
+      version: ticket.version,
+      job_type: 'OPTIMIZE_PDF',
+      provider: 'ADOBE',
+      next_attempt_at: new Date().toISOString(),
+      metadata: {reason: original.size > 4 * 1024 * 1024 ? 'PDF_ABOVE_4_MB' : 'THUMBNAIL_MISSING'}
+    });
+  }
+  const {error} = await supabaseAdmin().rpc('complete_media_upload', {
+    p_document: {
+      document_id: ticket.documentId,
+      process_id: ticket.processId,
+      version: ticket.version,
+      mime_type: original.mimeType,
+      size_bytes: original.size,
+      sha256: original.sha256,
+      drive_file_id: ''
+    },
+    p_objects: objects.map((object) => ({
       document_id: ticket.documentId,
       process_id: ticket.processId,
       version: ticket.version,
@@ -56,12 +73,21 @@ export async function registerCompletedMedia(ticket: MediaTicket, objects: Store
       object_key: object.objectPath,
       mime_type: object.mimeType,
       size_bytes: object.size,
-      sha256: object.sha256,
-      state: 'READY',
-      updated_at: new Date().toISOString()
-    }, {onConflict: 'document_id,version,role'});
-    if (error) throw new ApiError(503, 'DATABASE_UNAVAILABLE', 'Não foi possível registrar um objeto de mídia.');
-  }
+      sha256: object.sha256
+    })),
+    p_jobs: jobs,
+    p_event: {
+      request_id: `complete:${ticket.requestId}`,
+      document_id: ticket.documentId,
+      process_id: ticket.processId,
+      version: ticket.version,
+      event_type: 'MEDIA_UPLOAD_COMPLETED',
+      result: 'SUCCESS',
+      actor_id: ticket.sub,
+      details: {appRequestId: ticket.requestId, objectCount: objects.length}
+    }
+  });
+  if (error) throw new ApiError(503, 'DATABASE_TRANSACTION_FAILED', 'Não foi possível confirmar o documento de forma atômica.');
 }
 
 export async function enqueueOptimizationIfNeeded(ticket: MediaTicket, objects: StoredObject[]): Promise<void> {

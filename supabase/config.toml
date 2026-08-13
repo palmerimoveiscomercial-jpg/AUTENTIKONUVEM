@@ -1,0 +1,5 @@
+project_id = "autentiko-palmer"
+
+[functions.media-api]
+verify_jwt = false
+

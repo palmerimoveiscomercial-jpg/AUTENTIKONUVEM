@@ -120,6 +120,26 @@ function mediaCreateTicket_(user, document, process, action, requestId) {
   };
 }
 
+function mediaCloudUploadLimitMb_(mimeType, catalog) {
+  var isPdf = String(mimeType || '').toLowerCase() === 'application/pdf';
+  var configured = isPdf
+    ? Number(autConfigMap_().MEDIA_MAX_PDF_SOURCE_MB || 100)
+    : Number(autConfigMap_().MEDIA_MAX_UPLOAD_MB || 25);
+  var absoluteMaximum = isPdf ? 100 : 25;
+  var limit = Math.min(Math.max(configured, 1), absoluteMaximum);
+  var catalogLimit = Number(catalog && catalog.maxMb || 0);
+  var legacyDirectLimit = Number(AUTENTIKO.MAX_UPLOAD_MB || 6);
+
+  // Os catálogos antigos foram inicializados com o teto técnico do envio pelo
+  // Apps Script (6 MB). Na rota direta ao Storage esse valor não deve bloquear
+  // o limite próprio da nuvem. Um valor administrativo diferente do legado
+  // continua sendo respeitado como regra explícita do tipo documental.
+  if (isFinite(catalogLimit) && catalogLimit > 0 && catalogLimit !== legacyDirectLimit) {
+    limit = Math.min(limit, catalogLimit);
+  }
+  return limit;
+}
+
 function apiCriarTicketMidia(token, documentId, action, requestId) {
   try {
     autAssert_(mediaCloudEnabled_(), 'A nuvem documental ainda não está ativa para este ambiente.', 'FEATURE_DISABLED');
@@ -147,30 +167,110 @@ function apiReservarUploadNuvem(token, payload) {
     autAssert_(expectedVersion > 0 && expectedVersion <= autProcessVersion_(process),
       'A versão informada do processo é inválida. Atualize-o antes de enviar o documento.', 'PROCESS_VERSION_CONFLICT');
     var requestId = String(payload.requestId || '').trim();
-    requestKey = autClaimRequest_(user, 'MEDIA_UPLOAD_RESERVE|' + process.ID_PROCESSO, { requestId: requestId });
     var mimeType = String(payload.mimeType || '').toLowerCase();
     autAssert_(AUT_DOCUMENT_PREVIEW_MIME_TYPES.indexOf(mimeType) >= 0,
       'Formato de arquivo não permitido.', 'INVALID_FILE');
     var size = Number(payload.size || 0);
-    var configuredMaxMb = mimeType === 'application/pdf'
-      ? Number(autConfigMap_().MEDIA_MAX_PDF_SOURCE_MB || 100)
-      : Number(autConfigMap_().MEDIA_MAX_UPLOAD_MB || 25);
-    var maxMb = Math.min(Math.max(configuredMaxMb, 1), mimeType === 'application/pdf' ? 100 : 25);
-    autAssert_(isFinite(size) && size > 0 && size <= maxMb * 1024 * 1024,
-      'O arquivo deve possuir no máximo ' + maxMb + ' MB.', 'FILE_TOO_LARGE');
+    autAssert_(isFinite(size) && size > 0, 'O arquivo selecionado está vazio.', 'INVALID_FILE');
     var hash = String(payload.sha256 || '').toLowerCase();
     autAssert_(/^[a-f0-9]{64}$/.test(hash), 'Hash SHA-256 inválido.', 'HASH_INVALID');
     var catalog = autDocumentCatalog_().filter(function(item) {
       return String(item.id) === String(payload.typeId || '');
     })[0];
     autAssert_(catalog, 'Tipo de documento inválido.', 'VALIDATION_ERROR');
+    var maxMb = mediaCloudUploadLimitMb_(mimeType, catalog);
+    autAssert_(size <= maxMb * 1024 * 1024,
+      'O arquivo ultrapassa o limite de ' + maxMb + ' MB configurado para este tipo.', 'FILE_TOO_LARGE');
     var safeName = pdfDoc_sanitizeName_(payload.fileName, mimeType === 'application/pdf' ? 'documento.pdf' : 'documento');
     if (mimeType === 'application/pdf') pdfDoc_assertPdfName_(safeName);
-    autAssert_(!pdfDoc_findDuplicate_(process.ID_PROCESSO, hash, ''),
-      'Este documento já está anexado ao processo.', 'DUPLICATE_DOCUMENT');
     var existing = autRowsBy_('PROCESSO_DOCUMENTOS', 'ID_PROCESSO', process.ID_PROCESSO).filter(function(row) {
       return row.ID_DOCUMENTO_TIPO === catalog.id && !row.EXCLUIDO_EM;
     });
+    var existingDocumentId = String(payload.documentId || '').trim();
+    if (existingDocumentId) {
+      var storedDocument = autFind_('PROCESSO_DOCUMENTOS', 'ID_DOCUMENTO', existingDocumentId);
+      autAssert_(storedDocument && !storedDocument.EXCLUIDO_EM,
+        'O documento salvo no Drive não foi encontrado.', 'NOT_FOUND');
+      autAssert_(String(storedDocument.ID_PROCESSO) === String(process.ID_PROCESSO),
+        'O documento informado pertence a outro processo.', 'INVALID_DOCUMENT');
+      autAssert_(String(storedDocument.ID_DOCUMENTO_TIPO) === String(catalog.id),
+        'O tipo do documento salvo não corresponde ao envio.', 'INVALID_DOCUMENT');
+      autAssert_(String(storedDocument.ARQUIVO_ID || '').trim(),
+        'A réplica na nuvem exige um arquivo original já salvo no Drive.', 'DRIVE_FILE_REQUIRED');
+      autAssert_(String(storedDocument.HASH_SHA256 || '').toLowerCase() === hash,
+        'O arquivo local não corresponde ao hash do documento salvo no Drive.', 'HASH_MISMATCH');
+      autAssert_(Number(storedDocument.TAMANHO_BYTES || 0) === size,
+        'O tamanho do arquivo local não corresponde ao documento salvo no Drive.', 'SIZE_MISMATCH');
+      autAssert_(String(storedDocument.MIME_TYPE || '').toLowerCase() === mimeType,
+        'O formato do arquivo local não corresponde ao documento salvo no Drive.', 'MIME_MISMATCH');
+
+      var storedVersion = Number(storedDocument.MEDIA_VERSAO || storedDocument.VERSAO || 1);
+      if (String(storedDocument.MEDIA_STATUS || '') === 'READY' &&
+          String(storedDocument.SYNC_DRIVE_SUPABASE || '') === 'SINCRONIZADO') {
+        return autResult_({
+          documentId: storedDocument.ID_DOCUMENTO,
+          mediaVersion: storedVersion,
+          processVersion: autProcessVersion_(process),
+          replica: true,
+          alreadyReady: true
+        });
+      }
+
+      var replicaTicket = mediaCreateTicket_(user, storedDocument, process, 'UPLOAD', requestId);
+      autUpdateRow_('PROCESSO_DOCUMENTOS', storedDocument._row, {
+        SYNC_DRIVE_SUPABASE: 'DRIVE_READY_SUPABASE_PENDENTE',
+        MEDIA_ATUALIZADO_EM: autNow_(),
+        MEDIA_ERRO_CODIGO: ''
+      });
+      autAudit_(user, 'MEDIA_REPLICA_RESERVADA', 'PROCESSO', process.ID_PROCESSO, {
+        idDocumento: storedDocument.ID_DOCUMENTO,
+        versao: storedVersion,
+        tamanho: size,
+        mimeType: mimeType,
+        hash: hash
+      }, payload.context);
+      return autResult_({
+        documentId: storedDocument.ID_DOCUMENTO,
+        mediaVersion: storedVersion,
+        processVersion: autProcessVersion_(process),
+        ticket: replicaTicket.ticket,
+        expiresAt: replicaTicket.expiresAt,
+        apiBaseUrl: replicaTicket.apiBaseUrl,
+        maxUploadBytes: replicaTicket.maxUploadBytes,
+        replica: true
+      });
+    }
+    var resumable = existing.filter(function(row) {
+      return String(row.HASH_SHA256 || '').toLowerCase() === hash &&
+        String(row.MEDIA_STATUS || '') === 'UPLOAD_PENDING' && !row.ARQUIVO_ID &&
+        String(row.ENVIADO_POR || '') === String(user.NOME || '');
+    }).sort(function(a, b) { return autDateMs_(b.CRIADO_EM) - autDateMs_(a.CRIADO_EM); })[0];
+    if (resumable) {
+      // A reserva pode ter sido confirmada no Apps Script e a resposta ter se
+      // perdido antes de o navegador iniciar o TUS. Nesse caso, repetir a mesma
+      // requisição deve devolver um ticket novo para a linha pendente, sem criar
+      // outro documento e sem cair em DUPLICATE_REQUEST.
+      var resumableTicket = mediaCreateTicket_(user, resumable, process, 'UPLOAD', requestId);
+      autUpdateRow_('PROCESSO_DOCUMENTOS', resumable._row, {
+        MEDIA_ATUALIZADO_EM: autNow_(), MEDIA_ERRO_CODIGO: ''
+      });
+      autAudit_(user, 'MEDIA_UPLOAD_RETOMADO', 'PROCESSO', process.ID_PROCESSO, {
+        idDocumento: resumable.ID_DOCUMENTO, versao: Number(resumable.MEDIA_VERSAO || resumable.VERSAO || 1), hash: hash
+      }, payload.context);
+      return autResult_({
+        documentId: resumable.ID_DOCUMENTO,
+        mediaVersion: Number(resumable.MEDIA_VERSAO || resumable.VERSAO || 1),
+        processVersion: autProcessVersion_(process),
+        ticket: resumableTicket.ticket, expiresAt: resumableTicket.expiresAt,
+        apiBaseUrl: resumableTicket.apiBaseUrl, maxUploadBytes: resumableTicket.maxUploadBytes,
+        resumed: true
+      });
+    }
+    // A proteção contra clique duplo só é reivindicada quando uma nova linha
+    // realmente será criada. Retomadas idempotentes são tratadas acima.
+    requestKey = autClaimRequest_(user, 'MEDIA_UPLOAD_RESERVE|' + process.ID_PROCESSO, { requestId: requestId });
+    autAssert_(!pdfDoc_findDuplicate_(process.ID_PROCESSO, hash, ''),
+      'Este documento já está anexado ao processo.', 'DUPLICATE_DOCUMENT');
     var documentId = autUuid_();
     var mediaVersion = existing.length + 1;
     var now = autNow_();
@@ -247,12 +347,14 @@ function apiFinalizarUploadNuvem(token, receipt, requestId) {
     autAssert_(Number(payload.version || 0) === Number(found.document.MEDIA_VERSAO || found.document.VERSAO || 1),
       'O comprovante pertence a outra versão do documento.', 'MEDIA_VERSION_CONFLICT');
     requestKey = autClaimRequest_(user, 'MEDIA_UPLOAD_COMPLETE|' + found.document.ID_DOCUMENTO, { requestId: requestId });
+    var hasDriveOriginal = Boolean(String(found.document.ARQUIVO_ID || '').trim());
+    var syncState = hasDriveOriginal ? 'SINCRONIZADO' : 'SUPABASE_READY_DRIVE_PENDENTE';
     autUpdateRow_('PROCESSO_DOCUMENTOS', found.document._row, {
       MEDIA_STATUS: 'READY',
       MEDIA_VERSAO: Number(payload.version),
       THUMBNAIL_STATUS: payload.thumbnailStatus || 'PENDENTE',
       PREVIEW_STATUS: payload.previewStatus || 'READY',
-      SYNC_DRIVE_SUPABASE: 'SUPABASE_READY_DRIVE_PENDENTE',
+      SYNC_DRIVE_SUPABASE: syncState,
       MEDIA_ATUALIZADO_EM: autNow_(),
       MEDIA_ERRO_CODIGO: ''
     });
@@ -265,7 +367,9 @@ function apiFinalizarUploadNuvem(token, receipt, requestId) {
     autCommitRequest_(requestKey);
     return autResult_({
       storageReady: true,
-      driveSyncPending: true,
+      driveSyncPending: !hasDriveOriginal,
+      driveReady: hasDriveOriginal,
+      syncState: syncState,
       documentId: found.document.ID_DOCUMENTO,
       version: Number(payload.version)
     });

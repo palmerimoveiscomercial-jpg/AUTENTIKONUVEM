@@ -7,7 +7,7 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     service: 'autentiko-media-api',
-    version: '2.2.0',
+    version: '2.4.0',
     region: process.env.VERCEL_REGION || 'local',
     time: new Date().toISOString()
   }, {

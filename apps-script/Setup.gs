@@ -11,7 +11,7 @@ function setupSystem() {
     autSeedDocuments_();
     autSeedWorkflowV2_();
     var developer = autSeedDeveloper_();
-    var folder = autEnsureRootFolder_();
+    var folder = autEnsureWritableRootFolder_();
     autEnsureOpenTrigger_();
     autEnsureMaintenanceTrigger_();
     autInvalidateCaches_();
@@ -33,6 +33,16 @@ function setupSystem() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Atalho operacional mantido neste arquivo para permitir que a migração
+ * idempotente das bases cadastrais seja executada pela interface do Apps Script
+ * sem precisar abrir o arquivo CommercialService.gs, que é consideravelmente
+ * maior. Nenhum dado existente é apagado por esta rotina.
+ */
+function migrarBaseCadastrosSetup() {
+  return migrarBaseCadastros();
 }
 
 function autPrepareSheets_(db) {
@@ -103,12 +113,16 @@ function autSeedConfigurations_() {
     ['MENSAGEM_MANUTENCAO', 'O sistema está em manutenção programada. Tente novamente em alguns minutos.', 'SISTEMA', 'TEXT', 'Mensagem de manutenção', 'SIM'],
     ['PDF_PREVIEW_ENABLED', 'SIM', 'DOCUMENTOS', 'BOOLEAN', 'Ativa a pré-visualização autenticada e persistente de PDFs', 'SIM'],
     ['MAX_PDF_SIZE_MB', String(AUTENTIKO.MAX_UPLOAD_MB), 'DOCUMENTOS', 'NUMBER', 'Tamanho máximo de PDF aceito e pré-visualizado, em MB', 'SIM'],
-    ['MEDIA_CLOUD_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa gradualmente a nuvem documental Supabase/Vercel', 'SIM'],
-    ['MEDIA_API_BASE_URL', '', 'DOCUMENTOS', 'TEXT', 'URL HTTPS da API de mídia validada pelo AUTENTIKO', 'SIM'],
+    ['MEDIA_CLOUD_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa gradualmente a nuvem documental privada do Supabase', 'SIM'],
+    ['MEDIA_PROVIDER', 'SUPABASE_EDGE', 'DOCUMENTOS', 'TEXT', 'Provedor da API documental; Supabase Edge evita hospedagem comercial paga', 'NAO'],
+    ['MEDIA_API_BASE_URL', 'https://kgcucxqtzqcsskhjfmzl.supabase.co/functions/v1/media-api', 'DOCUMENTOS', 'TEXT', 'URL HTTPS da API de mídia validada pelo AUTENTIKO', 'SIM'],
     ['MEDIA_MAX_UPLOAD_MB', '25', 'DOCUMENTOS', 'NUMBER', 'Tamanho máximo de novos uploads diretos na nuvem, em MB', 'SIM'],
     ['MEDIA_MAX_PDF_SOURCE_MB', '100', 'DOCUMENTOS', 'NUMBER', 'Limite de entrada para PDF pesado; acima de 25 MB será otimizado em segundo plano', 'SIM'],
     ['ADOBE_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa o processamento excepcional por Adobe PDF Services', 'SIM'],
+    ['ADOBE_MONTHLY_LIMIT', '500', 'DOCUMENTOS', 'NUMBER', 'Limite mensal monitorado de transações do Adobe PDF Services', 'SIM'],
     ['AUDITORIA_RETENCAO_ANOS', '10', 'AUDITORIA', 'NUMBER', 'Retenção inicial dos registros finalizados e de auditoria', 'SIM'],
+    ['AUDIT_ANCHOR_ENABLED', 'NAO', 'AUDITORIA', 'BOOLEAN', 'Ancora periodicamente a raiz da auditoria no banco externo append-only', 'SIM'],
+    ['AUDIT_ANCHOR_INTERVAL_MINUTES', '15', 'AUDITORIA', 'NUMBER', 'Intervalo de ancoragem externa da cadeia de auditoria', 'SIM'],
     ['IP_CAPTURA_ATIVA', 'SIM', 'AUDITORIA', 'BOOLEAN', 'Registra IP público quando o navegador conseguir obtê-lo', 'SIM'],
     ['IP_SERVICO_PRIVACIDADE', 'api64.ipify.org', 'AUDITORIA', 'TEXT', 'Serviço configurado para consulta não bloqueante do IP público', 'NAO'],
     ['AVISO_PRIVACIDADE_AUDITORIA', 'O AUTENTIKO registra identificação da sessão, data, hora, navegador e, quando disponível, IP público para segurança e auditoria.', 'AUDITORIA', 'TEXT', 'Aviso apresentado antes de aceites eletrônicos', 'SIM'],
@@ -146,6 +160,19 @@ function autSeedConfigurations_() {
       });
     }
   });
+  var blankDefaultRepairs = {
+    MEDIA_PROVIDER: 'SUPABASE_EDGE',
+    MEDIA_API_BASE_URL: 'https://kgcucxqtzqcsskhjfmzl.supabase.co/functions/v1/media-api',
+    ADOBE_MONTHLY_LIMIT: '500'
+  };
+  Object.keys(blankDefaultRepairs).forEach(function(key) {
+    var row = existing[key];
+    if (row && !String(row.VALOR || '').trim()) {
+      autUpdateRow_('CONFIGURACOES', row._row, {
+        VALOR: blankDefaultRepairs[key], ATUALIZADO_EM: now, ATUALIZADO_POR: 'MIGRACAO_PADRAO_SEGURO'
+      });
+    }
+  });
 }
 
 function autSeedLists_() {
@@ -154,6 +181,7 @@ function autSeedLists_() {
     MODALIDADE_FINANCIAMENTO: ['Minha Casa Minha Vida', 'Subsídio do governo', 'CDC', 'Carta de crédito + CDC', 'Subsídio + CDC'],
     FORMA_ENTRADA: ['À vista', 'Parcelado', 'À vista + parcelamento', 'Carta de crédito', 'Valor + garantia'],
     TIPO_IMOVEL: ['Casa', 'Lote', 'Terreno', 'Apartamento', 'Lançamento', 'Imóvel na planta', 'Prédio comercial', 'Cota'],
+    MODALIDADE_CAPTACAO: ['Imóvel com exclusividade', 'Imóvel sem exclusividade', 'Autorização verbal simples', 'Autorização simples'],
     ORIGEM_RENDA: ['Salário', 'Trabalho autônomo', 'Empresa própria', 'Benefício do INSS', 'Aposentadoria ou pensão', 'Aluguéis', 'Investimentos', 'Outros'],
     SIM_NAO: ['Sim', 'Não'],
     TIPO_ATUACAO: ['Observação', 'Contato com cliente', 'Análise documental', 'Solicitação de documento', 'Alteração cadastral', 'Decisão']
@@ -247,10 +275,30 @@ function autOwnerFields_(type, start) {
 
 function autSeedForms_() {
   var forms = [];
+  var capture = 'CAPTACAO_HOMOLOGACAO_IMOVEL';
   AUTENTIKO.PROCESS_TYPES.forEach(function(type) {
-    forms = forms.concat(autBuyerFields_(type, 10));
+    if (type !== capture) forms = forms.concat(autBuyerFields_(type, 10));
+    else forms.push(autField_(type, 'Controle do processo', 'responsavel_processo', 'Responsável pelo processo', 'text', true, 10));
     forms = forms.concat(autOwnerFields_(type, 100));
   });
+
+  forms = forms.concat([
+    autField_(capture, 'Captação e autorização', 'captacao_modalidade', 'Modalidade da captação', 'select', true, 200, { list: 'MODALIDADE_CAPTACAO' }),
+    autField_(capture, 'Captação e autorização', 'autorizacao_rycky_palmer', 'Autorização de Rycky de Palmer para captação', 'select', true, 201, { list: 'SIM_NAO' }),
+    autField_(capture, 'Captação e autorização', 'captacao_observacoes', 'Condições e observações da autorização', 'textarea', false, 202),
+    autField_(capture, 'Dados do imóvel', 'tipo_imovel', 'Tipo de imóvel', 'select', true, 300, { list: 'TIPO_IMOVEL' }),
+    autField_(capture, 'Dados do imóvel', 'imovel_codigo', 'Código interno do imóvel', 'text', false, 301),
+    autField_(capture, 'Dados do imóvel', 'imovel_matricula', 'Matrícula do imóvel', 'text', false, 302),
+    autField_(capture, 'Dados do imóvel', 'imovel_iptu', 'Inscrição ou espelho do IPTU', 'text', false, 303),
+    autField_(capture, 'Dados do imóvel', 'imovel_endereco', 'Endereço completo do imóvel', 'textarea', true, 304),
+    autField_(capture, 'Dados do imóvel', 'imovel_rua', 'Rua', 'text', false, 305),
+    autField_(capture, 'Dados do imóvel', 'imovel_numero', 'Número', 'text', false, 306),
+    autField_(capture, 'Dados do imóvel', 'imovel_bairro', 'Bairro', 'text', false, 307),
+    autField_(capture, 'Dados do imóvel', 'imovel_complemento', 'Complemento', 'text', false, 308),
+    autField_(capture, 'Dados do imóvel', 'imovel_cidade', 'Cidade', 'text', false, 309),
+    autField_(capture, 'Dados do imóvel', 'imovel_estado', 'Estado', 'text', false, 310),
+    autField_(capture, 'Dados do imóvel', 'imovel_cep', 'CEP', 'cep', false, 311)
+  ]);
 
   var financed = 'COMPRA_IMOVEL_FINANCIADO';
   forms = forms.concat([
@@ -300,7 +348,7 @@ function autSeedForms_() {
     autField_(season, 'Dados do imóvel', 'imovel_endereco', 'Endereço do imóvel', 'textarea', true, 300)
   ]);
 
-  AUTENTIKO.PROCESS_TYPES.filter(function(type) { return [financed, cash, season].indexOf(type) < 0; }).forEach(function(type) {
+  AUTENTIKO.PROCESS_TYPES.filter(function(type) { return [financed, cash, season, capture].indexOf(type) < 0; }).forEach(function(type) {
     if (AUTENTIKO.RENTAL_INCOME_TYPES.indexOf(type) >= 0) {
       forms.push(autField_(type, 'Dados do imóvel e negociação', 'valor_aluguel_mensal', 'Valor mensal do aluguel', 'currency', true, 300));
     }
@@ -316,7 +364,7 @@ function autSeedForms_() {
   autAppendMany_('FORMULARIOS', forms.filter(function(field) { return !existing[field.ID_CAMPO]; }));
   var properties = PropertiesService.getScriptProperties();
   var schemaVersion = Number(properties.getProperty('AUT_FORM_SCHEMA_VERSION') || 0);
-  if (schemaVersion < 3) {
+  if (schemaVersion < 4) {
     var desired = {};
     forms.forEach(function(field) { desired[field.ID_CAMPO] = field; });
     var sheet = autSheet_('FORMULARIOS');
@@ -333,21 +381,24 @@ function autSeedForms_() {
       });
       sheet.getRange(2, 1, values.length, headers.length).setValues(values);
     }
-    properties.setProperty('AUT_FORM_SCHEMA_VERSION', '3');
+    properties.setProperty('AUT_FORM_SCHEMA_VERSION', '4');
   }
 }
 
 function autSeedDocuments_() {
   var all = AUTENTIKO.PROCESS_TYPES.slice();
+  var capture = 'CAPTACAO_HOMOLOGACAO_IMOVEL';
+  var standard = all.filter(function(type) { return type !== capture; });
   var rental = AUTENTIKO.RENTAL_INCOME_TYPES.slice();
   var commonMimeTypes = 'application/pdf,image/jpeg,image/png';
   var docs = [
-    ['DOC_IDENTIDADE_CLIENTE', 'RG/CNH', all, all, 10, commonMimeTypes],
-    ['DOC_COMPROVANTE_ENDERECO', 'Comprovante de residência', all, all, 20, commonMimeTypes],
+    ['DOC_IDENTIDADE_CLIENTE', 'RG/CNH', all, standard, 10, commonMimeTypes],
+    ['DOC_COMPROVANTE_ENDERECO', 'Comprovante de residência', all, standard, 20, commonMimeTypes],
     ['DOC_RG_CNH_PROPRIETARIO', 'RG/CNH do proprietário', all, all, 30, commonMimeTypes],
-    ['DOC_COMPROVANTE_RESIDENCIA_PROPRIETARIO', 'Comprovante de residência do proprietário', all, all, 40, commonMimeTypes],
+    ['DOC_COMPROVANTE_RESIDENCIA_PROPRIETARIO', 'Comprovante de residência do proprietário', all, standard, 40, commonMimeTypes],
     ['DOC_TERMO_PRESTACAO_LAUDO_CAPTACAO', 'Termo de prestação de serviço / laudo de captação de imóvel assinado', all, all, 50, commonMimeTypes],
-    ['DOC_CONSULTA_RECEITA_CPF', 'Consulta Receita Federal — CPF', all, [], 100, commonMimeTypes],
+    ['DOC_AUTORIZACAO_RYCKY_PALMER_CAPTACAO', 'Autorização de Rycky de Palmer para captação do imóvel', [capture], [capture], 60, commonMimeTypes],
+    ['DOC_CONSULTA_RECEITA_CPF', 'Consulta Receita Federal — CPF', all, [capture], 100, commonMimeTypes],
     ['DOC_CONSULTA_NEGATIVA_PF', 'Consulta negativa PF', all, [], 110, commonMimeTypes],
     ['DOC_CONSULTA_NEGATIVA_PRF', 'Consulta negativa PRF', all, [], 120, commonMimeTypes],
     ['DOC_CONSULTA_NEGATIVA_PC', 'Consulta negativa PC', all, [], 130, commonMimeTypes],
@@ -418,7 +469,22 @@ function autSeedDocuments_() {
       });
     });
   }
-  if (catalogVersion < 3) properties.setProperty('AUT_DOCUMENT_CATALOG_VERSION', '3');
+  if (catalogVersion < 4) {
+    docs.forEach(function(doc) {
+      var row = currentRows[doc[0]] || autFind_('DOCUMENTOS_CATALOGO', 'ID_DOCUMENTO_TIPO', doc[0]);
+      if (!row) return;
+      var available = autJsonParse_(row.TIPOS_PROCESSO_JSON, []);
+      var required = autJsonParse_(row.TIPOS_OBRIGATORIOS_JSON, []);
+      if (doc[2].indexOf(capture) >= 0 && available.indexOf(capture) < 0) available.push(capture);
+      if (doc[3].indexOf(capture) >= 0 && required.indexOf(capture) < 0) required.push(capture);
+      autUpdateRow_('DOCUMENTOS_CATALOGO', row._row, {
+        TIPOS_PROCESSO_JSON: JSON.stringify(available),
+        TIPOS_OBRIGATORIOS_JSON: JSON.stringify(required),
+        OBRIGATORIO: required.length ? 'SIM' : 'NAO'
+      });
+    });
+    properties.setProperty('AUT_DOCUMENT_CATALOG_VERSION', '4');
+  }
 }
 
 function autSeedDeveloper_() {
@@ -437,15 +503,154 @@ function autSeedDeveloper_() {
   return { created: true, email: email, password: password };
 }
 
+function autPreviousFolderIdsKey_(propertyKey) {
+  return propertyKey === 'AUT_DOCUMENTS_FOLDER_ID'
+    ? 'AUT_DOCUMENTS_FOLDER_PREVIOUS_IDS'
+    : propertyKey + '_PREVIOUS_IDS';
+}
+
+function autFolderHistoryIds_(propertyKey) {
+  var props = PropertiesService.getScriptProperties();
+  var ids = [];
+  var current = String(props.getProperty(propertyKey) || '').trim();
+  if (current) ids.push(current);
+  var previous = [];
+  try { previous = JSON.parse(props.getProperty(autPreviousFolderIdsKey_(propertyKey)) || '[]'); }
+  catch (ignore) { previous = []; }
+  if (!Array.isArray(previous)) previous = [];
+  previous.forEach(function(id) {
+    id = String(id || '').trim();
+    if (id && ids.indexOf(id) < 0) ids.push(id);
+  });
+  return ids;
+}
+
+function autRememberPreviousFolderId_(propertyKey, folderId) {
+  folderId = String(folderId || '').trim();
+  if (!folderId) return;
+  var props = PropertiesService.getScriptProperties();
+  var historyKey = autPreviousFolderIdsKey_(propertyKey);
+  var previous = [];
+  try { previous = JSON.parse(props.getProperty(historyKey) || '[]'); }
+  catch (ignore) { previous = []; }
+  if (!Array.isArray(previous)) previous = [];
+  previous = previous.map(function(id) { return String(id || '').trim(); }).filter(Boolean);
+  if (previous.indexOf(folderId) < 0) previous.push(folderId);
+  // O limite impede crescimento acidental da propriedade sem apagar arquivos.
+  if (previous.length > 100) previous = previous.slice(previous.length - 100);
+  props.setProperty(historyKey, JSON.stringify(previous));
+}
+
+function autProbeFolderWrite_(folder) {
+  var probe = null;
+  try {
+    probe = folder.createFile(Utilities.newBlob(
+      'AUTENTIKO_WRITE_CHECK',
+      'text/plain',
+      '.autentiko-write-check-' + Utilities.getUuid() + '.tmp'
+    ));
+    return { writable: true, error: '' };
+  } catch (err) {
+    return { writable: false, error: String(err && err.message || 'Falha de escrita no Google Drive.').slice(0, 300) };
+  } finally {
+    if (probe) {
+      try { probe.setTrashed(true); }
+      catch (cleanupError) { console.warn('Não foi possível mover o arquivo temporário de diagnóstico para a lixeira.'); }
+    }
+  }
+}
+
+function autCreateDocumentsRootFolder_() {
+  var timeZone = AUTENTIKO.TIMEZONE || 'America/Sao_Paulo';
+  var suffix = Utilities.formatDate(new Date(), timeZone, 'yyyyMMdd-HHmmss');
+  return DriveApp.createFolder('AUTENTIKO OK NUVEM - Documentos - ' + suffix);
+}
+
 function autEnsureRootFolder_() {
   var props = PropertiesService.getScriptProperties();
-  var id = props.getProperty('AUT_DOCUMENTS_FOLDER_ID');
+  var id = String(props.getProperty('AUT_DOCUMENTS_FOLDER_ID') || '').trim();
   if (id) {
-    try { return DriveApp.getFolderById(id); } catch (err) { console.warn('Pasta anterior indisponível: ' + err.message); }
+    try { return DriveApp.getFolderById(id); }
+    catch (err) {
+      autRememberPreviousFolderId_('AUT_DOCUMENTS_FOLDER_ID', id);
+      console.warn('A pasta documental configurada não está acessível; a referência anterior foi preservada.');
+    }
   }
-  var folder = DriveApp.createFolder('AUTENTIKO OK NUVEM - Documentos');
+  var folder = autCreateDocumentsRootFolder_();
   props.setProperty('AUT_DOCUMENTS_FOLDER_ID', folder.getId());
   return folder;
+}
+
+function autEnsureWritableRootFolder_() {
+  var props = PropertiesService.getScriptProperties();
+  var id = String(props.getProperty('AUT_DOCUMENTS_FOLDER_ID') || '').trim();
+  var folder = null;
+  if (id) {
+    try { folder = DriveApp.getFolderById(id); }
+    catch (err) { folder = null; }
+    if (folder) {
+      var currentProbe = autProbeFolderWrite_(folder);
+      if (currentProbe.writable) return folder;
+    }
+    autRememberPreviousFolderId_('AUT_DOCUMENTS_FOLDER_ID', id);
+  }
+
+  folder = autCreateDocumentsRootFolder_();
+  var newProbe = autProbeFolderWrite_(folder);
+  if (!newProbe.writable) {
+    throw new Error('Não foi possível criar uma pasta gravável para os documentos do AUTENTIKO. ' + newProbe.error);
+  }
+  props.setProperty('AUT_DOCUMENTS_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+function diagnosticarArmazenamentoDriveSetup() {
+  var props = PropertiesService.getScriptProperties();
+  var account = String(Session.getEffectiveUser().getEmail() || '').trim();
+  var id = String(props.getProperty('AUT_DOCUMENTS_FOLDER_ID') || '').trim();
+  var folder = null;
+  var probe = { writable: false, error: id ? '' : 'Pasta documental não configurada.' };
+  if (id) {
+    try {
+      folder = DriveApp.getFolderById(id);
+      probe = autProbeFolderWrite_(folder);
+    } catch (err) {
+      probe = { writable: false, error: String(err && err.message || 'Pasta inacessível.').slice(0, 300) };
+    }
+  }
+  var result = {
+    ok: probe.writable,
+    deployingAccount: account,
+    folderId: folder ? folder.getId() : id,
+    folderUrl: folder ? folder.getUrl() : '',
+    writable: probe.writable,
+    previousFolderCount: Math.max(0, autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').length - (id ? 1 : 0)),
+    error: probe.writable ? '' : probe.error
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+function repararArmazenamentoDriveSetup() {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var folder = autEnsureWritableRootFolder_();
+    var probe = autProbeFolderWrite_(folder);
+    var result = {
+      ok: probe.writable,
+      deployingAccount: String(Session.getEffectiveUser().getEmail() || '').trim(),
+      folderId: folder.getId(),
+      folderUrl: folder.getUrl(),
+      writable: probe.writable,
+      previousFolderCount: Math.max(0, autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').length - 1),
+      error: probe.writable ? '' : probe.error
+    };
+    console.log(JSON.stringify(result));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function autEnsureOpenTrigger_() {

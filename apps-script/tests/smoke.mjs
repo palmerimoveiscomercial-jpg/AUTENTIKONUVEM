@@ -142,6 +142,8 @@ class RangeMock {
   setBackground() { return this; }
   setFontColor() { return this; }
   setFontWeight() { return this; }
+  setNumberFormat() { return this; }
+  sort() { return this; }
   setWrap() { return this; }
 }
 
@@ -278,7 +280,9 @@ const Utilities = {
   Charset: { UTF_8: 'utf8' },
   getUuid: () => crypto.randomUUID(),
   computeDigest: (_algorithm, value) => signedBytes(crypto.createHash('sha256').update(bufferFromBytes(value)).digest()),
+  computeHmacSha256Signature: (value, key) => signedBytes(crypto.createHmac('sha256', bufferFromBytes(key)).update(bufferFromBytes(value)).digest()),
   base64EncodeWebSafe: (value) => bufferFromBytes(value).toString('base64url'),
+  base64DecodeWebSafe: (value) => signedBytes(Buffer.from(String(value), 'base64url')),
   base64Encode: (value) => bufferFromBytes(value).toString('base64'),
   base64Decode: (value) => signedBytes(Buffer.from(String(value), 'base64')),
   newBlob: (data, contentType, name) => new BlobMock(data, contentType, name),
@@ -355,7 +359,7 @@ const context = vm.createContext({
   MimeType: { PDF: 'application/pdf' }
 });
 
-const order = ['Config.gs', 'Utils.gs', 'DataService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'AdminService.gs', 'Setup.gs', 'Code.gs'];
+const order = ['Config.gs', 'Utils.gs', 'DataService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'MediaService.gs', 'AdminService.gs', 'Setup.gs', 'Code.gs'];
 for (const name of order) {
   const source = fs.readFileSync(path.join(projectDir, name), 'utf8');
   new vm.Script(source, { filename: name }).runInContext(context);
@@ -376,7 +380,7 @@ let setup;
 check('instalação completa', () => {
   setup = context.setupSystem();
   assert.equal(setup.ok, true);
-  assert.equal(setup.sheets.length, 23);
+  assert.equal(setup.sheets.length, 26);
   assert.equal(typeof setup.bootstrapPassword, 'string');
   assert.ok(setup.bootstrapPassword.length >= 12);
   assert.equal(context.autConfigMap_().PDF_PREVIEW_ENABLED, true);
@@ -387,27 +391,27 @@ check('instalação completa', () => {
   assert.equal(context.autConfigMap_().ADOBE_ENABLED, false);
 });
 
-check('649 campos organizados e 13 tipos de formulário', () => {
-  assert.equal(context.autRows_('FORMULARIOS').length, 649);
+check('683 campos organizados e 14 tipos de formulário', () => {
+  assert.equal(context.autRows_('FORMULARIOS').length, 683);
   const types = new Set(context.autRows_('FORMULARIOS').map((row) => row.TIPO_PROCESSO));
-  assert.equal(types.size, 13);
+  assert.equal(types.size, 14);
 });
 
 check('cache de formulários segmentado abaixo de 100 KB', () => {
   const all = context.autFormSchemas_();
-  assert.equal(Object.keys(all).length, 13);
+  assert.equal(Object.keys(all).length, 14);
   assert.ok(Buffer.byteLength(JSON.stringify(all), 'utf8') > 100_000, 'O cenário original precisa exceder 100 KB');
   assert.equal(cache.entries.has('AUT_FORM_SCHEMAS'), false);
   const formEntries = [...cache.entries].filter(([key]) => key.startsWith('AUT_FORM_SCHEMA_'));
-  assert.equal(formEntries.length, 13);
+  assert.equal(formEntries.length, 14);
   assert.ok(Math.max(...formEntries.map(([, value]) => Buffer.byteLength(value, 'utf8'))) < 15_000);
 });
 
 check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
-  assert.equal(diagnostic.formFields, 649);
-  assert.equal(diagnostic.codeVersion, '2.3.0');
+  assert.equal(diagnostic.formFields, 683);
+  assert.equal(diagnostic.codeVersion, '2.5.1');
   assert.ok(diagnostic.maxFormCacheBytes < 15_000);
 });
 
@@ -427,7 +431,7 @@ check('proteção de texto literal e reparo de configurações', () => {
   assert.equal(context.autFind_('CONFIGURACOES', 'CHAVE', 'VERSAO_SISTEMA').VALOR, context.AUTENTIKO.APP_VERSION);
   assert.equal(context.autFind_('CONFIGURACOES', 'CHAVE', 'EMPRESA_CRECI').VALOR, '12.594');
   assert.equal(context.autFind_('CONFIGURACOES', 'CHAVE', 'CERTIFICADO_CPF_TITULAR').VALOR, '06120034269');
-  assert.equal(context.autRows_('FORMULARIOS').length, 649, 'A reinstalação não pode duplicar campos');
+  assert.equal(context.autRows_('FORMULARIOS').length, 683, 'A reinstalação não pode duplicar campos');
 });
 
 let token;
@@ -441,7 +445,7 @@ check('login com senha temporária gerada', () => {
 check('bootstrap leve sem schema monolítico', () => {
   const bootstrap = data(context.apiBootstrap(token));
   assert.equal(Object.keys(bootstrap.formSchemas).length, 0);
-  assert.equal(bootstrap.processTypes.length, 13);
+  assert.equal(bootstrap.processTypes.length, 14);
   assert.ok(Buffer.byteLength(JSON.stringify(bootstrap), 'utf8') < 30_000);
 });
 
@@ -493,6 +497,112 @@ check('criação, listagem e detalhe do processo', () => {
   assert.ok(detail.requiredDocuments.some((doc) => doc.name === 'RG/CNH' && doc.required && doc.multiple));
 });
 
+check('Carta de Clientes deduplica CPF, permite busca e edição autorizada', () => {
+  const clients = data(context.apiPesquisarBaseClientes(token, { search: '52998224725' }));
+  assert.equal(clients.items.length, 1, 'O mesmo CPF usado em papéis distintos não pode duplicar cadastro');
+  assert.equal(clients.canEdit, true);
+  const match = data(context.apiBuscarCadastroPorDocumento(token, '529.982.247-25', { requestId: 'lookup-master-cpf' }));
+  assert.equal(match.found, true);
+  assert.equal(match.item.document, '52998224725');
+  const full = data(context.apiObterCadastroCliente(token, clients.items[0].id));
+  const saved = data(context.apiSalvarCadastroCliente(token, {
+    id: full.item.id, expectedVersion: full.item.version, personType: 'PF', document: full.item.document,
+    name: 'Cliente Mestre Revisado', rgIe: full.item.rgIe, email: 'mestre@palmer.test',
+    phone: '(91) 98888-7777', income: 9000, roles: full.item.roles,
+    address: { street: 'Rua da Base', number: '100', district: 'Centro', city: 'Belém', state: 'PA', zip: '66000000' }
+  }, { requestId: 'edit-master-client-one' }));
+  assert.equal(saved.saved, true);
+  const refreshed = data(context.apiObterCadastroCliente(token, full.item.id)).item;
+  assert.equal(refreshed.name, 'Cliente Mestre Revisado');
+  assert.equal(refreshed.income, 9000);
+  assert.equal(refreshed.address.city, 'Belém');
+  assert.equal(context.autRowsBy_('BASE_CLIENTES', 'CPF_CNPJ', '52998224725').length, 1);
+});
+
+check('Carta de Clientes repara zero inicial, consolida duplicata e preserva divergência real', () => {
+  const source = context.autRows_('BASE_CLIENTES')[0];
+  const now = context.autNow_();
+  const firstId = 'CLI-ZERO-CANONICO';
+  const duplicateId = 'CLI-ZERO-NUMERICO';
+  context.autAppend_('BASE_CLIENTES', {
+    ...source, ID_CADASTRO: firstId, TIPO_PESSOA: 'PF', CPF_CNPJ: '06120034269',
+    NOME_RAZAO_SOCIAL: 'Pessoa Zero', TELEFONE: '(91) 99999-0000', STATUS: 'ATIVO',
+    PROCESSOS_JSON: '[]', FONTES_JSON: '[]', PAPEIS_JSON: '["LOCATARIO"]',
+    CONFLITOS_ABERTOS: 0, QUALIDADE: 90, CRIADO_EM: now, ATUALIZADO_EM: now
+  });
+  context.autAppend_('BASE_CLIENTES', {
+    ...source, ID_CADASTRO: duplicateId, TIPO_PESSOA: 'PF', CPF_CNPJ: 6120034269,
+    NOME_RAZAO_SOCIAL: 'Pessoa Zero Divergente', TELEFONE: '', STATUS: 'ATIVO',
+    PROCESSOS_JSON: '[]', FONTES_JSON: '[]', PAPEIS_JSON: '["FIADOR"]',
+    CONFLITOS_ABERTOS: 0, QUALIDADE: 30, CRIADO_EM: now, ATUALIZADO_EM: now
+  });
+  assert.equal(context.autMasterCanonicalDocument_('PF', 6120034269), '06120034269');
+  const actor = { ID_USUARIO: 'TESTE', NOME: 'Teste', PERFIL: 'DESENVOLVEDOR', PERMISSOES_JSON: '["*"]' };
+  const summary = context.autMasterConsolidateClients_(actor, { requestId: 'normalize-zero-one' });
+  assert.equal(summary.merged, 1);
+  assert.equal(context.autMasterRowsByDocument_('061.200.342-69', 'PF').length, 1);
+  assert.equal(context.autFind_('BASE_CLIENTES', 'ID_CADASTRO', duplicateId).STATUS, 'MESCLADO');
+  assert.ok(context.autJsonParse_(context.autFind_('BASE_CLIENTES', 'ID_CADASTRO', firstId).PAPEIS_JSON, []).includes('FIADOR'));
+  assert.ok(context.autMasterOpenConflicts_(firstId).some((row) => row.CAMPO === 'NOME_RAZAO_SOCIAL'));
+  const repeated = context.autMasterConsolidateClients_(actor, { requestId: 'normalize-zero-two' });
+  assert.equal(repeated.merged, 0, 'A consolidação precisa ser idempotente');
+  const found = data(context.apiBuscarCadastroPorDocumento(token, '061.200.342-69', { requestId: 'lookup-zero-leading' }));
+  assert.equal(found.found, true);
+  assert.equal(found.item.document, '06120034269');
+  const search = data(context.apiPesquisarBaseClientes(token, { search: '061.200.342-69' }));
+  assert.equal(search.items.filter((item) => item.id === firstId).length, 1);
+});
+
+check('base de imóveis é reutilizável, versionada e sem duplicação', () => {
+  const properties = data(context.apiPesquisarBaseImoveis(token, { search: processData.imovel_codigo }));
+  assert.equal(properties.items.length, 1);
+  assert.equal(properties.canEdit, true);
+  const full = data(context.apiObterCadastroImovel(token, properties.items[0].id));
+  const saved = data(context.apiSalvarCadastroImovel(token, {
+    id: full.item.id, expectedVersion: full.item.version, code: full.item.code,
+    registration: 'MAT-TESTE-001', iptu: 'IPTU-001', type: 'Apartamento',
+    address: 'Rua da Base, 100, Belém - PA', addressData: { street: 'Rua da Base', number: '100', city: 'Belém', state: 'PA' },
+    captureMode: 'Imóvel com exclusividade', captureStatus: 'CAPTADO', authorizationRyckyPalmer: 'Sim'
+  }, { requestId: 'edit-master-property-one' }));
+  assert.equal(saved.saved, true);
+  const lookup = data(context.apiBuscarImovelPorIdentificador(token, 'MAT-TESTE-001', { requestId: 'lookup-property-one' }));
+  assert.equal(lookup.found, true);
+  assert.equal(lookup.item.address, 'Rua da Base, 100, Belém - PA');
+  assert.equal(context.autRows_('BASE_IMOVEIS').length, 1);
+});
+
+check('migração da base mestre é retomável e idempotente', () => {
+  const first = data(context.apiMigrarBaseCadastros(token, { requestId: 'master-migration-one' }));
+  assert.ok(first.processes >= 1);
+  const counts = { clients: context.autRows_('BASE_CLIENTES').length, properties: context.autRows_('BASE_IMOVEIS').length };
+  const versions = context.autRows_('BASE_CLIENTES').map((row) => [row.ID_CADASTRO, Number(row.VERSAO_REGISTRO)]);
+  data(context.apiMigrarBaseCadastros(token, { requestId: 'master-migration-two' }));
+  assert.equal(context.autRows_('BASE_CLIENTES').length, counts.clients);
+  assert.equal(context.autRows_('BASE_IMOVEIS').length, counts.properties);
+  assert.deepEqual(context.autRows_('BASE_CLIENTES').map((row) => [row.ID_CADASTRO, Number(row.VERSAO_REGISTRO)]), versions);
+});
+
+check('captação e homologação cria imóvel com documentação obrigatória própria', () => {
+  const form = data(context.apiObterFormularioProcesso(token, 'CAPTACAO_HOMOLOGACAO_IMOVEL'));
+  assert.ok(form.fields.some((field) => field.name === 'captacao_modalidade' && field.required));
+  assert.ok(form.fields.some((field) => field.name === 'autorizacao_rycky_palmer' && field.required));
+  const captureData = {};
+  for (const field of form.fields) captureData[field.name] = sampleValue(field);
+  captureData.imovel_codigo = 'CAP-IMOVEL-001';
+  captureData.imovel_matricula = 'CAP-MAT-001';
+  captureData.imovel_endereco = 'Avenida da Captação, 10, Belém - PA';
+  const created = data(context.apiCriarProcesso(token, { type: 'CAPTACAO_HOMOLOGACAO_IMOVEL', data: captureData }, { requestId: 'capture-process-one' }));
+  const detail = data(context.apiDetalharProcesso(token, created.process.id));
+  const required = detail.requiredDocuments.filter((document) => document.required).map((document) => document.id);
+  assert.ok(required.includes('DOC_RG_CNH_PROPRIETARIO'));
+  assert.ok(required.includes('DOC_CONSULTA_RECEITA_CPF'));
+  assert.ok(required.includes('DOC_TERMO_PRESTACAO_LAUDO_CAPTACAO'));
+  assert.ok(required.includes('DOC_AUTORIZACAO_RYCKY_PALMER_CAPTACAO'));
+  const property = data(context.apiBuscarImovelPorIdentificador(token, 'CAP-IMOVEL-001', { requestId: 'capture-property-lookup' }));
+  assert.equal(property.found, true);
+  assert.equal(property.item.captureStatus, 'CAPTADO');
+});
+
 check('modal leve e quatro abas carregadas de forma independente', () => {
   const shell = data(context.apiAbrirProcesso(token, processId));
   assert.equal(shell.process.id, processId);
@@ -535,6 +645,26 @@ check('modal leve e quatro abas carregadas de forma independente', () => {
   assert.ok(Array.isArray(audit.audit));
   assert.equal('documents' in audit, false);
   assert.equal('data' in audit, false);
+});
+
+check('edição da ficha é versionada e preserva a versão anterior', () => {
+  const before = context.autFind_('PROCESSOS', 'ID_PROCESSO', processId);
+  const versionBefore = context.autProcessVersion_(before);
+  const updatedData = { ...processData, cliente_nome: 'Cliente Atualizado com Segurança' };
+  const updated = data(context.apiAtualizarProcesso(token, processId, updatedData, {
+    expectedVersion: versionBefore,
+    requestId: 'process-edit-versioned-test'
+  }));
+  assert.equal(updated.version, versionBefore + 1);
+  const rows = context.autRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', processId);
+  const activeRows = rows.filter((row) => row.ATIVO === 'SIM');
+  const inactiveRows = rows.filter((row) => row.ATIVO === 'NAO');
+  assert.ok(activeRows.length >= financedFields.length);
+  assert.ok(inactiveRows.length >= financedFields.length);
+  assert.ok(inactiveRows.every((row) => row.SUBSTITUIDO_EM));
+  const registration = data(context.apiCarregarAbaProcesso(token, processId, 'CADASTRO'));
+  assert.equal(registration.data.cliente_nome, 'Cliente Atualizado com Segurança');
+  assert.equal(registration.processVersion, versionBefore + 1);
 });
 
 check('OK da pendência cria aceite eletrônico individual', () => {
@@ -744,6 +874,45 @@ check('upload por formulário/Blob, prévia segura, metadados, download e limite
   assert.ok(context.autRows_('AUDITORIA').some((row) => row.ACAO === 'PDF_ACESSO_NEGADO'));
 });
 
+check('reserva de upload na nuvem pode ser retomada sem duplicar e não conta como documento enviado', () => {
+  const cloudFlag = context.autFind_('CONFIGURACOES', 'CHAVE', 'MEDIA_CLOUD_ENABLED');
+  context.autUpdateRow_('CONFIGURACOES', cloudFlag._row, { VALOR: 'SIM' });
+  properties.set('AUT_MEDIA_SIGNING_SECRET', 'segredo-smoke-media-32-caracteres-minimo');
+  context.autInvalidateCaches_();
+  const expectedVersion = context.autProcessVersion_(context.autFind_('PROCESSOS', 'ID_PROCESSO', processId));
+  const payload = {
+    processId,
+    typeId: 'DOC_COMPROVANTE_ENDERECO',
+    fileName: 'retomada-segura.jpg',
+    mimeType: 'image/jpeg',
+    size: 145963,
+    sha256: 'a'.repeat(64),
+    expectedVersion,
+    requestId: 'media-reserve-retry-same-request',
+    context: { requestId: 'media-reserve-retry-same-request' }
+  };
+  const first = data(context.apiReservarUploadNuvem(token, payload));
+  const resumed = data(context.apiReservarUploadNuvem(token, payload));
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.documentId, first.documentId);
+  assert.equal(context.autRowsBy_('PROCESSO_DOCUMENTOS', 'ID_PROCESSO', processId)
+    .filter((row) => row.ID_DOCUMENTO === first.documentId).length, 1);
+  const pendingThumbnail = data(context.apiMiniaturaDocumento(token, first.documentId, {}));
+  assert.equal(pendingThumbnail.available, false);
+  assert.equal(pendingThumbnail.errorCode, 'CLOUD_UPLOAD_PENDING');
+  const requirement = data(context.apiDetalharProcesso(token, processId)).requiredDocuments
+    .find((item) => item.id === 'DOC_COMPROVANTE_ENDERECO');
+  assert.equal(requirement.uploaded, false, 'uma reserva incompleta não pode cumprir o requisito documental');
+  const pendingRow = context.autFind_('PROCESSO_DOCUMENTOS', 'ID_DOCUMENTO', first.documentId);
+  assert.equal(context.autIsDocumentStored_(pendingRow), false);
+  data(context.apiExcluirDocumento(token, first.documentId, {
+    expectedVersion: context.autProcessVersion_(context.autFind_('PROCESSOS', 'ID_PROCESSO', processId)),
+    requestId: 'remove-pending-cloud-smoke'
+  }));
+  context.autUpdateRow_('CONFIGURACOES', cloudFlag._row, { VALOR: 'NAO' });
+  context.autInvalidateCaches_();
+});
+
 check('falhas de Drive e planilha não deixam PDF parcial', () => {
   const process = context.autFind_('PROCESSOS', 'ID_PROCESSO', processId);
   const folderKey = `AUT_PROCESS_FOLDER_${context.autHash_(String(process.PROTOCOLO)).slice(0, 24)}`;
@@ -751,13 +920,26 @@ check('falhas de Drive e planilha não deixam PDF parcial', () => {
   assert.ok(folder);
 
   const originalCreateFile = folder.createFile;
+  const rootFolder = folders.get(properties.get('AUT_DOCUMENTS_FOLDER_ID'));
+  const originalRootCreateProcessFolder = rootFolder.createFolder;
+  const originalRootCreate = context.autCreateDocumentsRootFolder_;
+  const originalDriveCreateFolder = context.DriveApp.createFolder;
   folder.createFile = () => { throw new Error('Falha simulada no Google Drive'); };
+  context.autCreateDocumentsRootFolder_ = () => ({
+    getId: () => 'root-failure', getUrl: () => 'https://drive.google.com/drive/folders/root-failure',
+    createFile: () => { throw new Error('Falha simulada no Google Drive'); }
+  });
+  context.DriveApp.createFolder = () => { throw new Error('Falha simulada no Google Drive'); };
+  rootFolder.createFolder = () => { throw new Error('Falha simulada no Google Drive'); };
   const driveFailure = context.apiUploadDocumentoForm({
     token, processId, typeId: 'DOC_IDENTIDADE_CLIENTE',
     expectedVersion: context.autProcessVersion_(process), contextJson: '{}',
     file: new BlobMock('%PDF-1.7 falha drive', 'application/pdf', 'falha-drive.pdf')
   });
   folder.createFile = originalCreateFile;
+  context.autCreateDocumentsRootFolder_ = originalRootCreate;
+  context.DriveApp.createFolder = originalDriveCreateFolder;
+  rootFolder.createFolder = originalRootCreateProcessFolder;
   assert.equal(driveFailure.ok, false);
   assert.equal(driveFailure.code, 'PDF_OPERATION_FAILED');
   assert.equal(driveFailure.message, 'Não foi possível enviar o documento. Tente novamente.');
@@ -817,10 +999,10 @@ check('administração sem autenticações redundantes visíveis', () => {
   spreadsheet.getSheetByName('CONFIGURACOES').getRange(dateConfig._row, configHeaders.indexOf('VALOR') + 1).setValue(new Date('2025-08-18T12:00:00Z'));
   const admin = data(context.apiAdminBootstrap(token));
   assert.equal(admin.users.users.length, 1);
-  assert.equal(admin.documents.documents.length, 41);
+  assert.equal(admin.documents.documents.length, 42);
   assert.equal(admin.documents.documents.find((doc) => doc.id === 'DOC_IDENTIDADE_CLIENTE').requiredProcessTypes.length, 13);
   assert.equal(admin.documents.documents.find((doc) => doc.id === 'DOC_CONTRACHEQUE_OLERITE').processTypes.length, 4);
-  assert.equal(admin.forms.length, 649);
+  assert.equal(admin.forms.length, 683);
   assert.ok(admin.configs.configs.length >= 20);
   assert.equal(admin.configs.configs.find((config) => config.key === 'CERTIFICADO_EMISSAO').value, '2025-08-18');
   const sensitive = admin.configs.configs.filter((config) => config.type === 'SENSITIVE');

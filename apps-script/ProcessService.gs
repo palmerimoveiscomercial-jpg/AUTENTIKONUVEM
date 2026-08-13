@@ -80,7 +80,17 @@ function autProcessCard_(row) {
 
 function autProcessDataMap_(process) {
   var data = autJsonParse_(process.DADOS_JSON, {});
-  autRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', process.ID_PROCESSO).forEach(function(row) {
+  var processVersion = Math.max(autProcessVersion_(process), 1);
+  var candidates = autRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', process.ID_PROCESSO).filter(function(row) {
+    var rowVersion = Math.max(Number(row.VERSAO_PROCESSO || 1), 1);
+    return rowVersion <= processVersion && autNormalize_(row.ATIVO || 'SIM') !== 'NAO';
+  });
+  var latestVersion = candidates.reduce(function(maximum, row) {
+    return Math.max(maximum, Math.max(Number(row.VERSAO_PROCESSO || 1), 1));
+  }, 0);
+  candidates.filter(function(row) {
+    return Math.max(Number(row.VERSAO_PROCESSO || 1), 1) === latestVersion;
+  }).forEach(function(row) {
     var value = row.VALOR;
     if (String(row.TIPO_DADO) === 'checkbox' || /^[\[{]/.test(String(value || '').trim())) {
       value = autJsonParse_(String(value || ''), value);
@@ -312,7 +322,8 @@ function apiCriarProcesso(token, payload, context) {
       return {
         ID_DADO: autUuid_(), ID_PROCESSO: id, SECAO: field.section, CAMPO: field.name,
         ROTULO: field.label, VALOR: Array.isArray(value) ? JSON.stringify(value) : value,
-        TIPO_DADO: field.input, ATUALIZADO_EM: now
+        TIPO_DADO: field.input, VERSAO_PROCESSO: 1, ATIVO: 'SIM',
+        LOTE_ATUALIZACAO: 'CRIACAO-' + id, SUBSTITUIDO_EM: '', ATUALIZADO_EM: now
       };
     });
     autAppendMany_('PROCESSO_DADOS', virtualRows);
@@ -327,7 +338,9 @@ function apiCriarProcesso(token, payload, context) {
         STATUS_ANTERIOR: '', STATUS_NOVO: 'RASCUNHO', USUARIO: user.NOME, CRIADO_EM: now
       });
     }
-    autBootstrapParticipantsFromProcess_(autFind_('PROCESSOS', 'ID_PROCESSO', id), user);
+    var persistedProcess = autFind_('PROCESSOS', 'ID_PROCESSO', id);
+    autBootstrapParticipantsFromProcess_(persistedProcess, user);
+    autSyncProcessMasterDataSafe_(user, persistedProcess, data, context, { source: 'PROCESSO_CRIADO' });
     autAudit_(user, 'PROCESSO_CRIADO', 'PROCESSO', id, { protocolo: protocol, tipo: type }, context);
     if (incomeEvaluation.applicable && !incomeEvaluation.adequate) {
       autAudit_(user, 'ACEITE_RENDA_INSUFICIENTE', 'PROCESSO', id, {
@@ -356,7 +369,23 @@ function apiAtualizarProcesso(token, processId, data, context) {
     data = autCleanObject_(data || {});
     var schema = autValidateProcessData_(process.TIPO_PROCESSO, data);
     var now = autNow_();
+    var nextVersion = autProcessVersion_(process) + 1;
+    var batchId = 'EDICAO-' + autUuid_();
     var incomeEvaluation = autApplyIncomeAcceptance_(process.TIPO_PROCESSO, data, user, now);
+    var previousDataRows = autRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', processId).filter(function(row) {
+      return autNormalize_(row.ATIVO || 'SIM') !== 'NAO';
+    });
+    var nextDataRows = schema.filter(function(field) { return Object.prototype.hasOwnProperty.call(data, field.name); }).map(function(field) {
+      var value = data[field.name];
+      return {
+        ID_DADO: autUuid_(), ID_PROCESSO: processId, SECAO: field.section, CAMPO: field.name,
+        ROTULO: field.label,
+        VALOR: Array.isArray(value) || (value && typeof value === 'object') ? autJson_(value) : value,
+        TIPO_DADO: field.input, VERSAO_PROCESSO: nextVersion, ATIVO: 'PENDENTE',
+        LOTE_ATUALIZACAO: batchId, SUBSTITUIDO_EM: '', ATUALIZADO_EM: now
+      };
+    });
+    autAppendMany_('PROCESSO_DADOS', nextDataRows);
     autUpdateRow_('PROCESSOS', process._row, {
       RESPONSAVEL: data.responsavel_processo || process.RESPONSAVEL,
       CLIENTE_NOME: data.cliente_nome || '', CLIENTE_CPF: autDigits_(data.cliente_cpf),
@@ -366,20 +395,24 @@ function apiAtualizarProcesso(token, processId, data, context) {
       IMOVEL_ENDERECO: data.imovel_endereco || data.imovel_localidade || '',
       DADOS_JSON: autProcessSummaryJson_(data),
       ATUALIZADO_EM: now,
-      VERSAO_REGISTRO: autProcessVersion_(process) + 1
+      VERSAO_REGISTRO: nextVersion
     });
-    autDeleteRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', processId);
-    autAppendMany_('PROCESSO_DADOS', schema.filter(function(field) { return Object.prototype.hasOwnProperty.call(data, field.name); }).map(function(field) {
-      var value = data[field.name];
-      return { ID_DADO: autUuid_(), ID_PROCESSO: processId, SECAO: field.section, CAMPO: field.name, ROTULO: field.label, VALOR: Array.isArray(value) || (value && typeof value === 'object') ? autJson_(value) : value, TIPO_DADO: field.input, ATUALIZADO_EM: now };
-    }));
+    var stagedRows = autRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', processId).filter(function(row) {
+      return String(row.LOTE_ATUALIZACAO || '') === batchId;
+    });
+    autPatchRows_('PROCESSO_DADOS', stagedRows.map(function(row) { return row._row; }), { ATIVO: 'SIM' });
+    autPatchRows_('PROCESSO_DADOS', previousDataRows.map(function(row) { return row._row; }), {
+      ATIVO: 'NAO', SUBSTITUIDO_EM: now
+    });
     autInvalidateProcessApprovals_(processId, 'Ficha cadastral alterada', context);
     autRowsBy_('PROCESSO_PARTICIPANTES', 'ID_PROCESSO', processId).filter(function(row) {
       return autJsonParse_(row.DADOS_JSON, {}).origem === 'FICHA_CADASTRAL';
     }).forEach(function(row) {
       autUpdateRow_('PROCESSO_PARTICIPANTES', row._row, { ATIVO: 'NAO', ATUALIZADO_EM: now, ATUALIZADO_POR: user.NOME });
     });
-    autBootstrapParticipantsFromProcess_(autFind_('PROCESSOS', 'ID_PROCESSO', processId), user);
+    var refreshedProcess = autFind_('PROCESSOS', 'ID_PROCESSO', processId);
+    autBootstrapParticipantsFromProcess_(refreshedProcess, user);
+    autSyncProcessMasterDataSafe_(user, refreshedProcess, data, context, { source: 'PROCESSO_EDITADO' });
     autAudit_(user, 'PROCESSO_ATUALIZADO', 'PROCESSO', processId, { protocolo: process.PROTOCOLO }, context);
     if (incomeEvaluation.applicable && !incomeEvaluation.adequate) {
       autAudit_(user, 'ACEITE_RENDA_INSUFICIENTE', 'PROCESSO', processId, {
@@ -390,7 +423,7 @@ function apiAtualizarProcesso(token, processId, data, context) {
       }, context);
     }
     autCommitRequest_(requestKey);
-    return autResult_({ updated: true, version: autProcessVersion_(process) + 1, incomeEvaluation: incomeEvaluation });
+    return autResult_({ updated: true, version: nextVersion, incomeEvaluation: incomeEvaluation });
   } catch (err) { return autPublicError_(err); }
   finally { try { lock.releaseLock(); } catch (ignore) {} }
 }
@@ -399,7 +432,9 @@ function autRequiredDocumentStatus_(process, uploadedRows) {
   var catalog = autDocumentCatalog_().filter(function(doc) {
     return !doc.processTypes.length || doc.processTypes.indexOf(process.TIPO_PROCESSO) >= 0;
   });
-  var uploaded = uploadedRows || autRows_('PROCESSO_DOCUMENTOS').filter(function(row) { return row.ID_PROCESSO === process.ID_PROCESSO && !row.EXCLUIDO_EM; });
+  var uploaded = (uploadedRows || autRows_('PROCESSO_DOCUMENTOS').filter(function(row) {
+    return row.ID_PROCESSO === process.ID_PROCESSO && !row.EXCLUIDO_EM;
+  })).filter(autIsDocumentStored_);
   return catalog.map(function(doc) {
     var files = uploaded.filter(function(row) { return row.ID_DOCUMENTO_TIPO === doc.id; });
     return {
@@ -418,7 +453,9 @@ function autRequiredDocumentStatus_(process, uploadedRows) {
 
 function autRequiredDocumentGroups_(process, uploadedRows) {
   if (AUTENTIKO.RENTAL_INCOME_TYPES.indexOf(process.TIPO_PROCESSO) < 0) return [];
-  var uploaded = uploadedRows || autRowsBy_('PROCESSO_DOCUMENTOS', 'ID_PROCESSO', process.ID_PROCESSO).filter(function(row) { return !row.EXCLUIDO_EM; });
+  var uploaded = (uploadedRows || autRowsBy_('PROCESSO_DOCUMENTOS', 'ID_PROCESSO', process.ID_PROCESSO).filter(function(row) {
+    return !row.EXCLUIDO_EM;
+  })).filter(autIsDocumentStored_);
   var files = uploaded.filter(function(row) {
     return AUTENTIKO.INCOME_PROOF_DOCUMENT_IDS.indexOf(String(row.ID_DOCUMENTO_TIPO)) >= 0;
   });
@@ -431,6 +468,12 @@ function autRequiredDocumentGroups_(process, uploadedRows) {
     files: files.length,
     documentTypeIds: AUTENTIKO.INCOME_PROOF_DOCUMENT_IDS.slice()
   }];
+}
+
+function autIsDocumentStored_(row) {
+  if (!row || row.EXCLUIDO_EM) return false;
+  var status = String(row.MEDIA_STATUS || (row.ARQUIVO_ID ? 'DRIVE_ONLY' : '')).toUpperCase();
+  return status === 'READY' || status === 'DRIVE_ONLY';
 }
 
 function autProcessDocumentRows_(processId) {
@@ -977,19 +1020,71 @@ function apiExcluirProcesso(token, processId, reason, context) {
   finally { try { lock.releaseLock(); } catch (ignore) {} }
 }
 
-function autProcessFolder_(protocol) {
+function autProcessFolderPropertyKey_(protocol) {
+  return 'AUT_PROCESS_FOLDER_' + autHash_(String(protocol)).slice(0, 24);
+}
+
+function autForgetUnwritableProcessFolder_(protocol, folderId) {
   var properties = PropertiesService.getScriptProperties();
-  var propertyKey = 'AUT_PROCESS_FOLDER_' + autHash_(String(protocol)).slice(0, 24);
+  var propertyKey = autProcessFolderPropertyKey_(protocol);
+  folderId = String(folderId || '').trim();
+  if (folderId) autRememberPreviousFolderId_(propertyKey, folderId);
+  if (!folderId || String(properties.getProperty(propertyKey) || '') === folderId) {
+    properties.deleteProperty(propertyKey);
+  }
+}
+
+function autProcessFolder_(protocol, rejectedFolderId) {
+  var properties = PropertiesService.getScriptProperties();
+  var propertyKey = autProcessFolderPropertyKey_(protocol);
   var storedId = properties.getProperty(propertyKey);
+  rejectedFolderId = String(rejectedFolderId || '').trim();
+  if (rejectedFolderId && storedId && String(storedId) === rejectedFolderId) {
+    autRememberPreviousFolderId_(propertyKey, storedId);
+    properties.deleteProperty(propertyKey);
+    storedId = '';
+  }
   if (storedId) {
     try { return DriveApp.getFolderById(storedId); }
-    catch (err) { properties.deleteProperty(propertyKey); }
+    catch (err) { autForgetUnwritableProcessFolder_(protocol, storedId); }
   }
-  var root = autEnsureRootFolder_();
-  var folders = root.getFoldersByName(String(protocol));
-  var folder = folders.hasNext() ? folders.next() : root.createFolder(String(protocol));
+  var root = autEnsureWritableRootFolder_();
+  var folder = null;
+  if (!rejectedFolderId) {
+    var folders = root.getFoldersByName(String(protocol));
+    folder = folders.hasNext() ? folders.next() : null;
+  }
+  if (!folder) folder = root.createFolder(String(protocol));
   properties.setProperty(propertyKey, folder.getId());
   return folder;
+}
+
+function autCreateProcessDocumentFile_(protocol, blob, safeName, mimeType) {
+  var lastError = null;
+  var rejectedFolderId = '';
+  for (var attempt = 0; attempt < 2; attempt += 1) {
+    var folder = autWithScriptLock_(function() {
+      return autProcessFolder_(protocol, rejectedFolderId);
+    });
+    try {
+      return folder.createFile(blob.setName(safeName).setContentType(mimeType));
+    } catch (err) {
+      lastError = err;
+      try {
+        var failedFolderId = folder.getId();
+        rejectedFolderId = failedFolderId;
+        autWithScriptLock_(function() {
+          autForgetUnwritableProcessFolder_(protocol, failedFolderId);
+        });
+      } catch (repairError) {
+        console.warn('Não foi possível atualizar a referência da pasta de processo indisponível.');
+      }
+    }
+  }
+  throw new Error(
+    'Não foi possível gravar o documento no Google Drive após a tentativa de reparo. ' +
+    String(lastError && lastError.message || '').slice(0, 300)
+  );
 }
 
 function pdfDoc_previewEnabled_() {
@@ -1143,8 +1238,7 @@ function autStoreDocument_(token, payload, blob, context) {
         nome: safeName, tamanho: bytes.length, tipo: catalog.id, hash: hash, resultado: 'INICIADO', origem: 'WEB_APP'
       }, context);
     }
-    var folder = autWithScriptLock_(function() { return autProcessFolder_(processSnapshot.PROTOCOLO); });
-    file = folder.createFile(blob.setName(safeName).setContentType(mimeType));
+    file = autCreateProcessDocumentFile_(processSnapshot.PROTOCOLO, blob, safeName, mimeType);
     lock.waitLock(30000);
     var process = autRequireProcess_(user, payload.processId);
     autAssertProcessMutable_(process);
@@ -1270,15 +1364,27 @@ function autResolveStoredDocumentFile_(document) {
     } catch (err) { primaryError = err; }
   }
 
-  // Repara referências antigas ou substituídas procurando o mesmo arquivo na
-  // pasta do protocolo. O hash impede associar um homônimo incorreto.
-  try {
-    var rootId = PropertiesService.getScriptProperties().getProperty('AUT_DOCUMENTS_FOLDER_ID');
-    autAssert_(rootId, 'A pasta principal de documentos não está configurada.', 'DOCUMENT_FILE_UNAVAILABLE');
-    var root = DriveApp.getFolderById(rootId);
-    var folders = root.getFoldersByName(String(document.PROTOCOLO || ''));
-    while (folders.hasNext()) {
-      var matches = folders.next().getFilesByName(String(document.ARQUIVO_NOME || ''));
+  // Repara referências antigas ou substituídas procurando o mesmo arquivo
+  // também nas pastas preservadas depois de uma troca de conta/permissão. O
+  // hash impede associar um homônimo incorreto.
+  var protocol = String(document.PROTOCOLO || '');
+  var folderIds = autFolderHistoryIds_(autProcessFolderPropertyKey_(protocol));
+  var rootIds = autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID');
+  rootIds.forEach(function(rootId) {
+    try {
+      var folders = DriveApp.getFolderById(rootId).getFoldersByName(protocol);
+      while (folders.hasNext()) {
+        var folderId = folders.next().getId();
+        if (folderIds.indexOf(folderId) < 0) folderIds.push(folderId);
+      }
+    } catch (rootError) {
+      console.warn('Uma pasta documental anterior ainda não está acessível pela conta da implantação.');
+    }
+  });
+
+  for (var folderIndex = 0; folderIndex < folderIds.length; folderIndex += 1) {
+    try {
+      var matches = DriveApp.getFolderById(folderIds[folderIndex]).getFilesByName(String(document.ARQUIVO_NOME || ''));
       while (matches.hasNext()) {
         var candidate = matches.next();
         if (candidate.isTrashed()) continue;
@@ -1286,9 +1392,9 @@ function autResolveStoredDocumentFile_(document) {
           return candidate;
         }
       }
+    } catch (fallbackError) {
+      console.warn('Uma pasta de processo anterior não está acessível pela conta da implantação.');
     }
-  } catch (fallbackError) {
-    console.warn('Falha na recuperação alternativa do documento ' + String(document.ID_DOCUMENTO || '') + ': ' + fallbackError.message);
   }
 
   var detail = primaryError && primaryError.message ? ' Detalhe: ' + primaryError.message : '';
@@ -1342,7 +1448,20 @@ function apiMiniaturaDocumento(token, documentId, context) {
       try { return autResult_(JSON.parse(cached)); } catch (ignoreCachedThumbnail) {}
     }
 
-    if (!document.ARQUIVO_ID && document.MEDIA_STATUS === 'READY') {
+    var mediaStatus = String(document.MEDIA_STATUS || (document.ARQUIVO_ID ? 'DRIVE_ONLY' : '')).toUpperCase();
+    if (!document.ARQUIVO_ID && mediaStatus === 'UPLOAD_PENDING') {
+      return autResult_({
+        available: false,
+        fileName: document.ARQUIVO_NOME,
+        sourceMimeType: String(document.MIME_TYPE || '').toLowerCase(),
+        size: Number(document.TAMANHO_BYTES || 0),
+        fallbackAllowed: false,
+        errorCode: 'CLOUD_UPLOAD_PENDING',
+        message: 'O envio ainda não foi concluído. Use “Tentar novamente” na fila ou selecione o mesmo arquivo para retomar.'
+      });
+    }
+
+    if (!document.ARQUIVO_ID && mediaStatus === 'READY') {
       return autResult_({
         available: false,
         fileName: document.ARQUIVO_NOME,

@@ -1,0 +1,317 @@
+begin;
+
+create extension if not exists pgcrypto;
+
+-- A API nunca recebe permissão de UPDATE/DELETE nestas tabelas. Os gatilhos
+-- também impedem alterações acidentais pelo service_role. Um proprietário do
+-- banco ainda pode administrar o schema, por isso as raízes são ancoradas no
+-- Apps Script/Drive para tornar qualquer intervenção detectável.
+alter table public.media_events
+  add column if not exists sequence bigint,
+  add column if not exists previous_hash text,
+  add column if not exists event_hash text;
+
+create sequence if not exists public.media_events_sequence_seq;
+alter sequence public.media_events_sequence_seq owned by public.media_events.sequence;
+alter table public.media_events alter column sequence set default nextval('public.media_events_sequence_seq');
+
+update public.media_events
+set sequence = nextval('public.media_events_sequence_seq')
+where sequence is null;
+
+select setval(
+  'public.media_events_sequence_seq',
+  greatest(coalesce((select max(sequence) from public.media_events), 0), 1),
+  coalesce((select max(sequence) from public.media_events), 0) > 0
+);
+
+create unique index if not exists media_events_sequence_uidx
+  on public.media_events (sequence);
+
+create or replace function public.autentiko_rebuild_media_event_chain()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  item record;
+  prior text := '';
+  material text;
+  calculated text;
+begin
+  perform pg_advisory_xact_lock(hashtextextended('autentiko-media-event-chain', 0));
+  for item in select * from public.media_events order by sequence loop
+    material := concat_ws('|',
+      item.sequence::text,
+      item.request_id,
+      coalesce(item.document_id, ''),
+      coalesce(item.process_id, ''),
+      coalesce(item.version::text, ''),
+      item.event_type,
+      item.result,
+      coalesce(item.actor_id, ''),
+      coalesce(item.details, '{}'::jsonb)::text,
+      to_char(item.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+    );
+    calculated := encode(digest(prior || '|' || material, 'sha256'), 'hex');
+    update public.media_events
+       set previous_hash = prior, event_hash = calculated
+     where id = item.id;
+    prior := calculated;
+  end loop;
+end;
+$$;
+
+drop trigger if exists media_events_append_only on public.media_events;
+select public.autentiko_rebuild_media_event_chain();
+
+create or replace function public.autentiko_media_event_before_insert()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  prior text := '';
+  material text;
+begin
+  perform pg_advisory_xact_lock(hashtextextended('autentiko-media-event-chain', 0));
+  if new.sequence is null then
+    new.sequence := nextval('public.media_events_sequence_seq');
+  end if;
+  select coalesce(event_hash, '') into prior
+    from public.media_events order by sequence desc limit 1;
+  new.previous_hash := coalesce(prior, '');
+  material := concat_ws('|',
+    new.sequence::text,
+    new.request_id,
+    coalesce(new.document_id, ''),
+    coalesce(new.process_id, ''),
+    coalesce(new.version::text, ''),
+    new.event_type,
+    new.result,
+    coalesce(new.actor_id, ''),
+    coalesce(new.details, '{}'::jsonb)::text,
+    to_char(new.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+  );
+  new.event_hash := encode(digest(new.previous_hash || '|' || material, 'sha256'), 'hex');
+  return new;
+end;
+$$;
+
+create or replace function public.autentiko_deny_audit_mutation()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  raise exception using
+    errcode = '42501',
+    message = 'AUTENTIKO_AUDIT_APPEND_ONLY';
+end;
+$$;
+
+-- Funções SECURITY DEFINER não podem conservar o EXECUTE padrão de PUBLIC.
+-- Os gatilhos continuam executando normalmente sem conceder uma API de
+-- reconstrução ou mutação da cadeia a anon/authenticated.
+revoke all on function public.autentiko_rebuild_media_event_chain() from public, anon, authenticated;
+revoke all on function public.autentiko_media_event_before_insert() from public, anon, authenticated;
+revoke all on function public.autentiko_deny_audit_mutation() from public, anon, authenticated;
+grant execute on function public.autentiko_rebuild_media_event_chain() to service_role;
+
+drop trigger if exists media_events_hash_insert on public.media_events;
+create trigger media_events_hash_insert
+before insert on public.media_events
+for each row execute function public.autentiko_media_event_before_insert();
+
+drop trigger if exists media_events_append_only on public.media_events;
+create trigger media_events_append_only
+before update or delete on public.media_events
+for each row execute function public.autentiko_deny_audit_mutation();
+
+alter table public.media_events
+  alter column sequence set not null,
+  alter column previous_hash set not null,
+  alter column event_hash set not null;
+
+create table if not exists public.audit_anchors (
+  id uuid primary key default gen_random_uuid(),
+  sequence bigint generated by default as identity unique,
+  source text not null check (source in ('APPS_SCRIPT_SHEETS', 'MEDIA_CLOUD')),
+  source_sequence bigint not null check (source_sequence >= 0),
+  record_count bigint not null check (record_count >= 0),
+  chain_hash text not null check (chain_hash ~ '^[A-Fa-f0-9]{64}$' or chain_hash = ''),
+  app_version text not null,
+  actor_id text,
+  request_id text not null unique,
+  previous_hash text not null default '',
+  anchor_hash text not null default '',
+  signed_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+create or replace function public.autentiko_anchor_before_insert()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  prior text := '';
+  material text;
+begin
+  perform pg_advisory_xact_lock(hashtextextended('autentiko-audit-anchor-chain', 0));
+  select coalesce(anchor_hash, '') into prior
+    from public.audit_anchors order by sequence desc limit 1;
+  new.previous_hash := coalesce(prior, '');
+  material := concat_ws('|',
+    new.sequence::text,
+    new.source,
+    new.source_sequence::text,
+    new.record_count::text,
+    lower(new.chain_hash),
+    new.app_version,
+    coalesce(new.actor_id, ''),
+    new.request_id,
+    to_char(new.signed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+  );
+  new.anchor_hash := encode(digest(new.previous_hash || '|' || material, 'sha256'), 'hex');
+  return new;
+end;
+$$;
+
+revoke all on function public.autentiko_anchor_before_insert() from public, anon, authenticated;
+
+drop trigger if exists audit_anchors_hash_insert on public.audit_anchors;
+create trigger audit_anchors_hash_insert
+before insert on public.audit_anchors
+for each row execute function public.autentiko_anchor_before_insert();
+
+drop trigger if exists audit_anchors_append_only on public.audit_anchors;
+create trigger audit_anchors_append_only
+before update or delete on public.audit_anchors
+for each row execute function public.autentiko_deny_audit_mutation();
+
+alter table public.audit_anchors enable row level security;
+revoke all on public.audit_anchors from anon, authenticated;
+
+create or replace function public.complete_media_upload(
+  p_document jsonb,
+  p_objects jsonb,
+  p_jobs jsonb,
+  p_event jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  object_item jsonb;
+  job_item jsonb;
+  existing_doc public.media_documents%rowtype;
+  existing_event uuid;
+begin
+  if nullif(p_document->>'document_id', '') is null
+     or nullif(p_document->>'process_id', '') is null
+     or coalesce((p_document->>'version')::integer, 0) < 1 then
+    raise exception 'AUTENTIKO_MEDIA_DOCUMENT_INVALID';
+  end if;
+  select id into existing_event from public.media_events
+   where request_id = p_event->>'request_id';
+  if existing_event is not null then
+    return jsonb_build_object('ok', true, 'idempotent', true);
+  end if;
+
+  insert into public.media_documents (
+    document_id, process_id, version, mime_type, size_bytes, sha256,
+    drive_file_id, media_status, sync_state, last_error_code
+  ) values (
+    p_document->>'document_id', p_document->>'process_id', (p_document->>'version')::integer,
+    p_document->>'mime_type', (p_document->>'size_bytes')::bigint, lower(p_document->>'sha256'),
+    nullif(p_document->>'drive_file_id', ''), 'READY', 'STORAGE_READY', null
+  ) on conflict (document_id, version) do nothing;
+
+  select * into existing_doc from public.media_documents
+   where document_id = p_document->>'document_id'
+     and version = (p_document->>'version')::integer;
+  if existing_doc.sha256 <> lower(p_document->>'sha256')
+     or existing_doc.size_bytes <> (p_document->>'size_bytes')::bigint
+     or existing_doc.process_id <> p_document->>'process_id' then
+    raise exception 'AUTENTIKO_MEDIA_IMMUTABLE_CONFLICT';
+  end if;
+
+  for object_item in select value from jsonb_array_elements(coalesce(p_objects, '[]'::jsonb)) loop
+    if object_item->>'document_id' <> p_document->>'document_id'
+       or object_item->>'process_id' <> p_document->>'process_id'
+       or (object_item->>'version')::integer <> (p_document->>'version')::integer then
+      raise exception 'AUTENTIKO_MEDIA_OBJECT_SCOPE_CONFLICT';
+    end if;
+    insert into public.media_objects (
+      document_id, process_id, version, role, bucket, object_key,
+      mime_type, size_bytes, sha256, state
+    ) values (
+      object_item->>'document_id', object_item->>'process_id', (object_item->>'version')::integer,
+      object_item->>'role', object_item->>'bucket', object_item->>'object_key',
+      object_item->>'mime_type', (object_item->>'size_bytes')::bigint,
+      lower(object_item->>'sha256'), 'READY'
+    ) on conflict (document_id, version, role) do nothing;
+    if not exists (
+      select 1 from public.media_objects
+       where document_id = object_item->>'document_id'
+         and version = (object_item->>'version')::integer
+         and role = object_item->>'role'
+         and object_key = object_item->>'object_key'
+         and sha256 = lower(object_item->>'sha256')
+         and size_bytes = (object_item->>'size_bytes')::bigint
+    ) then
+      raise exception 'AUTENTIKO_MEDIA_OBJECT_IMMUTABLE_CONFLICT';
+    end if;
+  end loop;
+
+  for job_item in select value from jsonb_array_elements(coalesce(p_jobs, '[]'::jsonb)) loop
+    if job_item->>'document_id' <> p_document->>'document_id'
+       or job_item->>'process_id' <> p_document->>'process_id'
+       or (job_item->>'version')::integer <> (p_document->>'version')::integer then
+      raise exception 'AUTENTIKO_MEDIA_JOB_SCOPE_CONFLICT';
+    end if;
+    insert into public.media_jobs (
+      document_id, process_id, version, job_type, provider, state,
+      attempts, next_attempt_at, metadata
+    ) values (
+      job_item->>'document_id', job_item->>'process_id', (job_item->>'version')::integer,
+      job_item->>'job_type', job_item->>'provider', 'PENDING', 0,
+      coalesce((job_item->>'next_attempt_at')::timestamptz, now()),
+      coalesce(job_item->'metadata', '{}'::jsonb)
+    ) on conflict (document_id, version, job_type) do nothing;
+  end loop;
+
+  insert into public.media_events (
+    request_id, document_id, process_id, version, event_type,
+    result, actor_id, details
+  ) values (
+    p_event->>'request_id', p_event->>'document_id', p_event->>'process_id',
+    (p_event->>'version')::integer, p_event->>'event_type', p_event->>'result',
+    nullif(p_event->>'actor_id', ''), coalesce(p_event->'details', '{}'::jsonb)
+  );
+  return jsonb_build_object('ok', true, 'idempotent', false);
+end;
+$$;
+
+revoke all on function public.complete_media_upload(jsonb, jsonb, jsonb, jsonb) from public, anon, authenticated;
+grant execute on function public.complete_media_upload(jsonb, jsonb, jsonb, jsonb) to service_role;
+
+create or replace view public.audit_integrity_status
+with (security_invoker = true) as
+select
+  (select count(*) from public.media_events) as media_event_count,
+  (select coalesce(max(sequence), 0) from public.media_events) as media_event_sequence,
+  (select coalesce(event_hash, '') from public.media_events order by sequence desc limit 1) as media_event_root,
+  (select count(*) from public.audit_anchors) as anchor_count,
+  (select coalesce(anchor_hash, '') from public.audit_anchors order by sequence desc limit 1) as anchor_root;
+
+revoke all on public.audit_integrity_status from anon, authenticated;
+
+commit;

@@ -2,7 +2,7 @@
   "name": "@autentiko/media-maintenance",
   "private": true,
   "type": "module",
-  "version": "2.2.0",
+  "version": "2.5.0",
   "scripts": {
     "migrate": "node migrate-media.mjs",
     "reconcile": "node reconcile-media.mjs",

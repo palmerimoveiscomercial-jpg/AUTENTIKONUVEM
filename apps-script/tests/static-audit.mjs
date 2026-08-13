@@ -12,6 +12,8 @@ const serverSource = serverFiles.map((name) => fs.readFileSync(path.join(project
 const scriptsHtml = fs.readFileSync(path.join(projectDir, 'Scripts.html'), 'utf8');
 const indexHtml = fs.readFileSync(path.join(projectDir, 'Index.html'), 'utf8');
 const stylesHtml = fs.readFileSync(path.join(projectDir, 'Styles.html'), 'utf8');
+const edgeFunction = fs.readFileSync(path.join(projectDir, '..', 'supabase', 'functions', 'media-api', 'index.ts'), 'utf8');
+const securityMigration = fs.readFileSync(path.join(projectDir, '..', 'supabase', 'migrations', '202608110002_security_audit.sql'), 'utf8');
 
 let checks = 0;
 function check(name, fn) {
@@ -320,7 +322,7 @@ check('cache seguro, resistente e sem recarregar prévias ou abas', () => {
   assert.match(scriptsHtml, /if \(!rendered\) renderProcessPane/);
   assert.doesNotMatch(scriptsHtml, /state\.processLoadedTabs\.has\(normalized\)\)\s*\{\s*renderProcessPane/);
   assert.match(scriptsHtml, /state\.processTabScroll\.set/);
-  assert.match(scriptsHtml, /schemaVersion:\s*'2\.2\.0'/);
+  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.1'/);
   assert.match(scriptsHtml, /canvasToBoundedThumbnailBlob\(canvas, preferredType, 80 \* 1024\)/);
   assert.match(scriptsHtml, /maxWidth = 360/);
   assert.match(scriptsHtml, /maxHeight = 270/);
@@ -351,6 +353,9 @@ check('prévia PDF persistente possui flag, validação, auditoria e rollback se
   assert.match(serverSource, /apiReservarUploadNuvem/);
   assert.match(serverSource, /apiFinalizarUploadNuvem/);
   assert.match(scriptsHtml, /runCloudUploadJob/);
+  assert.match(serverSource, /CLOUD_UPLOAD_PENDING/);
+  assert.match(serverSource, /filter\(autIsDocumentStored_\)/);
+  assert.match(serverSource, /if \(resumable\)[\s\S]{0,1800}resumed: true/);
   assert.match(scriptsHtml, /'x-signature': target\.uploadToken/);
   assert.match(scriptsHtml, /chunkSize: 6 \* 1024 \* 1024/);
   assert.match(scriptsHtml, /uploadDataDuringCreation: true/);
@@ -399,6 +404,15 @@ check('ações visuais respeitam a responsabilidade atual do processo', () => {
   assert.doesNotMatch(scriptsHtml, /Informe o ID da evidência conferida/);
 });
 
+check('segredo documental é gravado somente em Script Properties', () => {
+  assert.match(serverSource, /function apiAdminSalvarSegredoMidia/);
+  assert.match(serverSource, /setProperty\('AUT_MEDIA_SIGNING_SECRET', secret\)/);
+  assert.match(serverSource, /valueExposed:\s*false/);
+  assert.match(scriptsHtml, /type="password"/);
+  assert.match(scriptsHtml, /apiAdminSalvarSegredoMidia/);
+  assert.doesNotMatch(scriptsHtml, /AUT_MEDIA_SIGNING_SECRET\s*[:=]\s*['"][A-Za-z0-9_-]{64}/);
+});
+
 check('hierarquia gerencial, sinal de roteamento e rascunho protegido', () => {
   assert.match(serverSource, /GERENTE_GERAL/);
   assert.match(serverSource, /function apiEnviarGerenteGeral/);
@@ -407,11 +421,14 @@ check('hierarquia gerencial, sinal de roteamento e rascunho protegido', () => {
   assert.match(serverSource, /function autIsProcessExecutive_/);
   assert.match(serverSource, /routing:\s*routing/);
   assert.match(scriptsHtml, /sendGeneralManager/);
-  assert.match(scriptsHtml, /SHORT_PROCESS_DRAFT_TTL_MS = 30 \* 60 \* 1000/);
+  assert.match(scriptsHtml, /SHORT_PROCESS_DRAFT_TTL_MS = 10 \* 60 \* 1000/);
   assert.match(scriptsHtml, /function saveShortProcessDraft/);
   assert.match(scriptsHtml, /function readShortProcessDraft/);
+  assert.match(scriptsHtml, /function cancelProcessForm/);
+  assert.match(scriptsHtml, /function discardCreateProcessDrafts/);
   assert.match(scriptsHtml, /Esta janela não fecha ao clicar fora/);
   assert.match(indexHtml, /id="process-draft-status"/);
+  assert.match(indexHtml, /data-cancel-process-form/);
 });
 
 check('correções preventivas de desempenho, e-mail, privacidade e transições', () => {
@@ -447,6 +464,52 @@ check('correções preventivas de desempenho, e-mail, privacidade e transições
   assert.match(scriptsHtml, /data-add-participant/);
   assert.match(scriptsHtml, /data-approve-all-categories/);
   assert.match(indexHtml, /id="contracts-view"/);
+});
+
+check('nuvem segura, edição HTML e painel administrativo incremental', () => {
+  assert.match(serverSource, /function apiAdminSaudeSistema/);
+  assert.match(serverSource, /function apiAncorarAuditoria/);
+  assert.match(serverSource, /AUDIT_ANCHOR_ENABLED/);
+  assert.match(serverSource, /function autPatchRows_/);
+  assert.match(serverSource, /LOTE_ATUALIZACAO/);
+  assert.doesNotMatch(serverSource, /autDeleteRows_\('PROCESSO_DADOS'/);
+  assert.match(scriptsHtml, /function sha256FileInWorker/);
+  assert.match(scriptsHtml, /new Worker\(workerUrl\)/);
+  assert.match(scriptsHtml, /function submitContractModel/);
+  assert.match(scriptsHtml, /loadAdmin\('models',true\)/);
+  assert.match(indexHtml, /id="contract-model-modal"/);
+  assert.match(indexHtml, /data-admin-tab="security"/);
+  assert.match(indexHtml, /id="security-health"/);
+  assert.match(edgeFunction, /sha256\.create\(\)/);
+  assert.match(edgeFunction, /stored\.body\.getReader\(\)/);
+  assert.doesNotMatch(edgeFunction, /await blob\.arrayBuffer\(\)/);
+  assert.match(edgeFunction, /https:\/\/\*-script\.googleusercontent\.com/);
+  assert.match(edgeFunction, /parsed\.hostname\.endsWith\('-script\.googleusercontent\.com'\)/);
+  assert.match(securityMigration, /revoke all on function public\.autentiko_rebuild_media_event_chain\(\) from public, anon, authenticated/);
+  assert.match(securityMigration, /AUTENTIKO_MEDIA_OBJECT_SCOPE_CONFLICT/);
+  assert.match(securityMigration, /AUTENTIKO_MEDIA_JOB_SCOPE_CONFLICT/);
+});
+
+check('Carta de Clientes, imóveis e autopreenchimento são normalizados e protegidos', () => {
+  assert.match(serverSource, /BASE_CLIENTES:\s*\[/);
+  assert.match(serverSource, /BASE_CLIENTES_CONFLITOS:\s*\[/);
+  assert.match(serverSource, /BASE_IMOVEIS:\s*\[/);
+  assert.match(serverSource, /function apiBuscarCadastroPorDocumento/);
+  assert.match(serverSource, /function apiSalvarCadastroCliente/);
+  assert.match(serverSource, /function apiSalvarCadastroImovel/);
+  assert.match(serverSource, /BASE_DUPLICATE_DETECTED/);
+  assert.match(serverSource, /autMasterBaseEditor_/);
+  assert.match(serverSource, /\['DESENVOLVEDOR', 'GERENTE_ADMINISTRATIVO', 'GERENTE_GERAL'\]/);
+  assert.match(serverSource, /CAPTACAO_HOMOLOGACAO_IMOVEL/);
+  assert.match(serverSource, /DOC_AUTORIZACAO_RYCKY_PALMER_CAPTACAO/);
+  assert.match(indexHtml, /id="database-view"/);
+  assert.match(indexHtml, /id="database-match-modal"/);
+  assert.match(scriptsHtml, /function scheduleCustomerDatabaseLookup/);
+  assert.match(scriptsHtml, /Notamos que o CPF informado possui registro em nossa base de dados/);
+  assert.match(scriptsHtml, /function applyDatabaseMatch/);
+  assert.match(scriptsHtml, /Você pode revisar e editar qualquer informação antes de salvar/);
+  assert.match(stylesHtml, /\.database-tabs/);
+  assert.match(stylesHtml, /\.validated-control\.valid \.field-validation-light/);
 });
 
 console.log(`\n${checks} grupos de auditoria estática concluídos com sucesso.`);

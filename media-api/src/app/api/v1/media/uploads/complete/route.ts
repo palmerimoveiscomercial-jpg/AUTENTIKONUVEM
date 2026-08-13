@@ -1,5 +1,5 @@
 import {NextRequest} from 'next/server';
-import {enqueueDriveSync, enqueueOptimizationIfNeeded, registerCompletedMedia} from '@/lib/database';
+import {registerCompletedMedia} from '@/lib/database';
 import {fail, json, options} from '@/lib/http';
 import {completionRequestSchema, completionTokenSchema} from '@/lib/schemas';
 import {verifyStoredObject} from '@/lib/storage';
@@ -33,8 +33,6 @@ export async function POST(request: NextRequest) {
       exp: Math.floor(Date.now() / 1000) + 600
     };
     await registerCompletedMedia(ticketLike, completion.objects);
-    await enqueueDriveSync(ticketLike);
-    await enqueueOptimizationIfNeeded(ticketLike, completion.objects);
     const original = completion.objects.find((item) => item.role === 'original')!;
     const receipt = signInternal({
       kind: 'media-receipt',

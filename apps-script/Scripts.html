@@ -11,6 +11,7 @@
     contracts: [],
     contractQueue: 'TODOS',
     admin: null,
+    adminLoadedAt: new Map(),
     forcePasswordChange: false,
     documentUploadProcessId: '',
     pendingDocumentFiles: new Map(),
@@ -61,6 +62,24 @@
     imageEncoderSupport: new Map(),
     processDraftDirty: false,
     processDraftTimer: 0,
+    processFormMode: 'create',
+    processEditId: '',
+    processEditExpectedVersion: 0,
+    database: {
+      tab: 'clients',
+      clients: [],
+      properties: [],
+      clientPage: 1,
+      propertyPage: 1,
+      clientTotal: 0,
+      propertyTotal: 0,
+      canEditClients: false,
+      canEditProperties: false
+    },
+    databaseMatch: null,
+    databaseLookupTimer: 0,
+    databaseLookupNonce: 0,
+    propertyLookupTimer: 0,
     context: {
       device: {
         userAgent: navigator.userAgent,
@@ -114,7 +133,7 @@
     apiReprocessarMidia: 30000
   };
   const BROWSER_CACHE = Object.freeze({
-    schemaVersion: '2.2.0',
+    schemaVersion: '2.5.1',
     database: 'AUTENTIKO_BROWSER_CACHE',
     store: 'entries',
     maxBytes: 96 * 1024 * 1024,
@@ -123,7 +142,7 @@
     thumbnailTtlMs: 7 * 24 * 60 * 60 * 1000,
     processTabTtlMs: 5 * 60 * 1000
   });
-  const SHORT_PROCESS_DRAFT_TTL_MS = 30 * 60 * 1000;
+  const SHORT_PROCESS_DRAFT_TTL_MS = 10 * 60 * 1000;
 
   function readCookie(name) {
     const prefix = `${encodeURIComponent(name)}=`;
@@ -455,8 +474,9 @@
     return `autentiko_process_draft_active:${shortProcessDraftOwner()}`;
   }
 
-  function shortProcessDraftKey(type) {
-    return `autentiko_process_draft:${shortProcessDraftOwner()}:${String(type || '')}`;
+  function shortProcessDraftKey(type, processId = state.processEditId) {
+    const scope = state.processFormMode === 'edit' && processId ? `edit:${processId}` : 'create';
+    return `autentiko_process_draft:${shortProcessDraftOwner()}:${scope}:${String(type || '')}`;
   }
 
   function updateShortProcessDraftStatus(message = '', saved = false) {
@@ -467,15 +487,16 @@
     status.classList.toggle('saved', saved);
   }
 
-  function readShortProcessDraft(type = '') {
+  function readShortProcessDraft(type = '', processId = state.processEditId) {
     try {
-      const selectedType = type || sessionStorage.getItem(shortProcessDraftPointerKey()) || '';
+      const editing = state.processFormMode === 'edit' && Boolean(processId);
+      const selectedType = type || (editing ? state.currentProcess?.process?.type : sessionStorage.getItem(shortProcessDraftPointerKey())) || '';
       if (!selectedType) return null;
-      const key = shortProcessDraftKey(selectedType);
+      const key = shortProcessDraftKey(selectedType, processId);
       const draft = JSON.parse(sessionStorage.getItem(key) || 'null');
-      if (!draft || draft.owner !== shortProcessDraftOwner() || Date.now() - Number(draft.savedAt || 0) > SHORT_PROCESS_DRAFT_TTL_MS) {
+      if (!draft || draft.owner !== shortProcessDraftOwner() || String(draft.processId || '') !== String(editing ? processId : '') || Date.now() - Number(draft.savedAt || 0) > SHORT_PROCESS_DRAFT_TTL_MS) {
         sessionStorage.removeItem(key);
-        if (!type) sessionStorage.removeItem(shortProcessDraftPointerKey());
+        if (!editing && !type) sessionStorage.removeItem(shortProcessDraftPointerKey());
         return null;
       }
       return draft;
@@ -488,15 +509,17 @@
     const draft = {
       owner: shortProcessDraftOwner(),
       type,
+      processId: state.processFormMode === 'edit' ? state.processEditId : '',
+      expectedVersion: state.processFormMode === 'edit' ? state.processEditExpectedVersion : 0,
       data: formObject($('#dynamic-process-form')),
       incomeAccepted: Boolean($('#income-acceptance-check')?.checked),
       savedAt: Date.now()
     };
     try {
-      sessionStorage.setItem(shortProcessDraftKey(type), JSON.stringify(draft));
-      sessionStorage.setItem(shortProcessDraftPointerKey(), type);
+      sessionStorage.setItem(shortProcessDraftKey(type, draft.processId), JSON.stringify(draft));
+      if (state.processFormMode !== 'edit') sessionStorage.setItem(shortProcessDraftPointerKey(), type);
       state.processDraftDirty = true;
-      updateShortProcessDraftStatus(`Rascunho temporário salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}. Válido por 30 minutos nesta aba.`, true);
+      updateShortProcessDraftStatus(`Rascunho temporário salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}. Válido por 10 minutos nesta aba.`, true);
       return draft;
     } catch (ignoreDraftWrite) {
       updateShortProcessDraftStatus('O navegador bloqueou a memória temporária. Mantenha esta janela aberta até salvar.', false);
@@ -512,16 +535,58 @@
     state.processDraftTimer = setTimeout(saveShortProcessDraft, 300);
   }
 
-  function clearShortProcessDraft(type = '') {
-    const selectedType = type || $('#new-process-type')?.value || sessionStorage.getItem(shortProcessDraftPointerKey()) || '';
+  function clearShortProcessDraft(type = '', processId = state.processEditId) {
+    const editing = state.processFormMode === 'edit' && Boolean(processId);
+    const selectedType = type || $('#new-process-type')?.value || (editing ? state.currentProcess?.process?.type : sessionStorage.getItem(shortProcessDraftPointerKey())) || '';
     try {
-      if (selectedType) sessionStorage.removeItem(shortProcessDraftKey(selectedType));
-      sessionStorage.removeItem(shortProcessDraftPointerKey());
+      if (selectedType) sessionStorage.removeItem(shortProcessDraftKey(selectedType, processId));
+      if (!editing) sessionStorage.removeItem(shortProcessDraftPointerKey());
     } catch (ignoreDraftClear) {}
     clearTimeout(state.processDraftTimer);
     state.processDraftTimer = 0;
     state.processDraftDirty = false;
     updateShortProcessDraftStatus('', false);
+  }
+
+  function discardCreateProcessDrafts() {
+    const prefix = `autentiko_process_draft:${shortProcessDraftOwner()}:create:`;
+    try {
+      for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+        const key = sessionStorage.key(index);
+        if (key && key.startsWith(prefix)) sessionStorage.removeItem(key);
+      }
+      sessionStorage.removeItem(shortProcessDraftPointerKey());
+    } catch (ignoreDraftDiscard) {}
+  }
+
+  function cancelProcessForm() {
+    const editing = state.processFormMode === 'edit' && Boolean(state.processEditId);
+    const hasDraft = state.processDraftDirty || Boolean(readShortProcessDraft($('#new-process-type')?.value || '', state.processEditId));
+    if (hasDraft && !confirm('Cancelar e descartar definitivamente os dados ainda não enviados? Esta ação não poderá ser desfeita.')) return false;
+    const processId = state.processEditId;
+    const type = $('#new-process-type')?.value || state.currentProcess?.process?.type || '';
+    clearTimeout(state.processDraftTimer);
+    state.processDraftTimer = 0;
+    if (editing) clearShortProcessDraft(type, processId);
+    else {
+      discardCreateProcessDrafts();
+      state.processDraftDirty = false;
+      updateShortProcessDraftStatus('', false);
+    }
+    clearTimeout(state.databaseLookupTimer);
+    clearTimeout(state.propertyLookupTimer);
+    state.databaseLookupNonce += 1;
+    state.databaseMatch = null;
+    state.processFormMode = 'create';
+    state.processEditId = '';
+    state.processEditExpectedVersion = 0;
+    if ($('#new-process-type')) $('#new-process-type').disabled = false;
+    if (editing && state.currentProcess) {
+      openModal('detail-modal');
+      return true;
+    }
+    closeModal(true);
+    return true;
   }
 
   let toastTimer;
@@ -616,6 +681,8 @@
     $('#maintenance-badge').classList.toggle('hidden', !state.bootstrap.config.MODO_MANUTENCAO);
     const admin = ['USUARIO_GERIR','FORMULARIO_GERIR','CONFIGURACAO_GERIR'].some(hasPermission);
     $('#admin-nav').classList.toggle('hidden', !admin);
+    const databaseAccess = hasPermission('BASE_CLIENTES_VER') || hasPermission('BASE_IMOVEIS_VER');
+    $('#database-nav').classList.toggle('hidden', !databaseAccess);
     fillGlobalSelects();
     await loadProcesses('dashboard');
     const warmPdf = () => { void loadPdfJs().catch(() => {}); };
@@ -714,6 +781,197 @@
     } catch(error){$('#contracts-table').innerHTML=`<div class="empty-state">${esc(error.message)}</div>`;}
   }
 
+  function databasePageButtons(kind, page, total, pageSize = 50) {
+    const pages = Math.max(1, Math.ceil(Number(total || 0) / pageSize));
+    if (pages <= 1) return '';
+    return `<button type="button" class="btn ghost compact" data-database-page-kind="${esc(kind)}" data-database-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>← Anterior</button>
+      <span>Página <strong>${page}</strong> de <strong>${pages}</strong></span>
+      <button type="button" class="btn ghost compact" data-database-page-kind="${esc(kind)}" data-database-page="${page + 1}" ${page >= pages ? 'disabled' : ''}>Próxima →</button>`;
+  }
+
+  async function loadCustomerDatabase(page = 1) {
+    if (!hasPermission('BASE_CLIENTES_VER')) {
+      $('#database-clients-table').innerHTML = '<div class="empty-state">Seu perfil não possui acesso à Carta de Clientes.</div>';
+      return;
+    }
+    $('#database-clients-table').innerHTML = '<div class="empty-state">Organizando cadastros em ordem alfabética...</div>';
+    try {
+      const result = await api('apiPesquisarBaseClientes', state.token, {search:$('#database-client-search').value, page, pageSize:50});
+      state.database.clients = result.items || [];
+      state.database.clientPage = result.page || page;
+      state.database.clientTotal = result.total || 0;
+      state.database.canEditClients = Boolean(result.canEdit);
+      $('#database-client-summary').innerHTML = `<strong>${result.total || 0}</strong> cadastro(s) único(s) · ordem alfabética · edição ${result.canEdit ? 'autorizada' : 'restrita'}`;
+      $('#database-clients-table').innerHTML = result.items?.length ? table(
+        ['Nome','CPF/CNPJ','Contato','Papéis','Qualidade','Processos',''],
+        result.items.map(item => [
+          `<strong>${esc(item.name || 'Sem nome')}</strong><br><small>${esc(item.id)}</small>`,
+          esc(item.document),
+          `${esc(item.phone || '—')}<br><small>${esc(item.email || '')}</small>`,
+          (item.roles || []).map(role => `<span class="database-role">${esc(statusText(role))}</span>`).join(' ') || '—',
+          `<span class="database-quality ${Number(item.quality || 0) >= 70 ? 'good' : 'attention'}">${Number(item.quality || 0)}%</span>${item.conflicts ? `<br><small class="database-conflict">${item.conflicts} conflito(s)</small>` : ''}`,
+          String(item.processCount || 0),
+          `<button type="button" class="link-btn" data-customer-record="${esc(item.id)}">${result.canEdit ? 'Ver / editar' : 'Ver cadastro'}</button>`
+        ])
+      ) : '<div class="empty-state"><strong>Nenhum cadastro encontrado.</strong><br>Novos dados válidos serão consolidados a partir dos processos.</div>';
+      $('#database-clients-pagination').innerHTML = databasePageButtons('clients', state.database.clientPage, state.database.clientTotal);
+    } catch (error) {
+      $('#database-clients-table').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
+    }
+  }
+
+  async function loadPropertyDatabase(page = 1) {
+    if (!hasPermission('BASE_IMOVEIS_VER')) {
+      $('#database-properties-table').innerHTML = '<div class="empty-state">Seu perfil não possui acesso à base de imóveis.</div>';
+      return;
+    }
+    $('#database-properties-table').innerHTML = '<div class="empty-state">Organizando imóveis...</div>';
+    try {
+      const result = await api('apiPesquisarBaseImoveis', state.token, {search:$('#database-property-search').value, page, pageSize:50});
+      state.database.properties = result.items || [];
+      state.database.propertyPage = result.page || page;
+      state.database.propertyTotal = result.total || 0;
+      state.database.canEditProperties = Boolean(result.canEdit);
+      $('#database-property-summary').innerHTML = `<strong>${result.total || 0}</strong> imóvel(is) cadastrado(s) · origem vinculada aos processos`;
+      $('#database-properties-table').innerHTML = result.items?.length ? table(
+        ['Imóvel','Código / matrícula','Endereço','Captação','Processos','Atualização',''],
+        result.items.map(item => [
+          `<strong>${esc(item.type || 'Imóvel')}</strong><br><small>${esc(item.id)}</small>`,
+          `${esc(item.code || '—')}<br><small>${esc(item.registration || '')}</small>`,
+          esc(item.address || '—'),
+          `${esc(item.captureMode || 'Cadastro geral')}<br><small>${esc(statusText(item.captureStatus || item.status))}</small>`,
+          String(item.processCount || 0),
+          dateText(item.updatedAt),
+          `<button type="button" class="link-btn" data-property-record="${esc(item.id)}">Ver imóvel</button>`
+        ])
+      ) : '<div class="empty-state"><strong>Nenhum imóvel encontrado.</strong><br>Use o processo de Captação e Homologação para formar a base.</div>';
+      $('#database-properties-pagination').innerHTML = databasePageButtons('properties', state.database.propertyPage, state.database.propertyTotal);
+    } catch (error) {
+      $('#database-properties-table').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
+    }
+  }
+
+  function setDatabaseTab(tab) {
+    state.database.tab = tab === 'properties' ? 'properties' : 'clients';
+    $$('[data-database-tab]').forEach(button => button.classList.toggle('active', button.dataset.databaseTab === state.database.tab));
+    $('#database-clients-panel').classList.toggle('active', state.database.tab === 'clients');
+    $('#database-properties-panel').classList.toggle('active', state.database.tab === 'properties');
+  }
+
+  async function loadDatabase(force = false) {
+    if (!hasPermission('BASE_CLIENTES_VER') && hasPermission('BASE_IMOVEIS_VER')) setDatabaseTab('properties');
+    if (state.database.tab === 'properties') return loadPropertyDatabase(force ? 1 : state.database.propertyPage);
+    return loadCustomerDatabase(force ? 1 : state.database.clientPage);
+  }
+
+  function fillCustomerRecordForm(item, canEdit, conflicts = []) {
+    const form = resetForm('#customer-record-form');
+    if (!form) return;
+    const address = item.address || {};
+    const values = {
+      id:item.id, expectedVersion:item.version, personType:item.personType, document:item.document, name:item.name,
+      tradeName:item.tradeName, rgIe:item.rgIe, issuer:item.issuer, birthOpening:item.birthOpening,
+      nationality:item.nationality, legalRepresentative:item.legalRepresentative, maritalStatus:item.maritalStatus,
+      propertyRegime:item.propertyRegime, profession:item.profession, income:item.income ? formatBRL(item.income) : '',
+      incomeOrigin:item.incomeOrigin, employer:item.employer, job:item.job, email:item.email, phone:item.phone,
+      messagePhone:item.messagePhone, messageContactName:item.messageContactName, zip:address.zip, street:address.street,
+      number:address.number, district:address.district, complement:address.complement, city:address.city, state:address.state
+    };
+    Object.entries(values).forEach(([name, value]) => { const control = formControl(form, name); if (control) control.value = value ?? ''; });
+    $$('input,select,textarea', form).forEach(control => { if (!['id','expectedVersion'].includes(control.name)) control.disabled = !canEdit; });
+    $('#customer-record-save').classList.toggle('hidden', !canEdit);
+    $('#customer-record-title').textContent = item.name || 'Cadastro mestre';
+    $('#customer-record-banner').innerHTML = `<strong>${esc(item.id)}</strong><span>${esc((item.roles || []).map(statusText).join(' · ') || 'Cadastro geral')}</span><span>Qualidade ${Number(item.quality || 0)}%</span><span>${Number(item.processCount || 0)} processo(s)</span>${item.conflicts ? `<span class="database-conflict">${item.conflicts} conflito(s) aguardando revisão</span>` : ''}`;
+    const conflictArea = $('#customer-record-conflicts');
+    conflictArea.classList.toggle('hidden', !conflicts.length);
+    conflictArea.innerHTML = conflicts.length ? `<h3>Divergências preservadas para conferência</h3><p>Nenhuma informação foi descartada ou escolhida silenciosamente. Compare a origem antes de corrigir o cadastro.</p><div class="master-conflict-list">${conflicts.map(conflict=>`<article class="master-conflict-item"><strong>${esc(statusText(conflict.field))}</strong><small>Atual: ${esc(String(conflict.currentValue||'—').slice(0,500))}</small><small>Informação recebida: ${esc(String(conflict.proposedValue||'—').slice(0,500))}</small><small>${esc(conflict.source||'Processo')} · ${esc(conflict.processId||'sem processo')} · ${esc(dateText(conflict.createdAt))}</small></article>`).join('')}</div>` : '';
+  }
+
+  async function openCustomerRecord(id) {
+    openModal('customer-record-modal');
+    $('#customer-record-title').textContent = 'Carregando cadastro...';
+    $('#customer-record-banner').innerHTML = '<span class="mini-spinner"></span> Consultando dados protegidos...';
+    try {
+      const result = await api('apiObterCadastroCliente', state.token, id);
+      fillCustomerRecordForm(result.item, Boolean(result.canEdit), result.conflicts || []);
+    } catch (error) {
+      closeModal(true);
+      toast(error.message, 'error');
+    }
+  }
+
+  async function submitCustomerRecord(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = $('#customer-record-save');
+    const data = formObject(form);
+    data.income = parseCurrencyText(data.income);
+    data.address = {zip:data.zip, street:data.street, number:data.number, district:data.district, complement:data.complement, city:data.city, state:data.state};
+    data.requestId = requestId();
+    setBusy(button, true, 'Salvando...');
+    try {
+      await api('apiSalvarCadastroCliente', state.token, data, {...state.context, requestId:data.requestId});
+      closeModal(true);
+      toast('Cadastro mestre atualizado e auditado.', 'success');
+      await loadCustomerDatabase(state.database.clientPage);
+    } catch (error) { toast(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  }
+
+  async function openPropertyRecord(id) {
+    openModal('property-record-modal');
+    $('#property-record-content').innerHTML = '<div class="empty-state">Carregando imóvel...</div>';
+    try {
+      const result = await api('apiObterCadastroImovel', state.token, id);
+      const item = result.item;
+      const address = item.addressData || {};
+      const canEdit = Boolean(result.canEdit);
+      $('#property-record-title').textContent = item.address || item.code || 'Cadastro do imóvel';
+      const form = $('#property-record-form');
+      formControl(form,'id').value = item.id;
+      formControl(form,'expectedVersion').value = item.version;
+      $('#property-record-content').innerHTML = `<div class="master-record-banner"><strong>${esc(item.id)}</strong><span>${esc(item.type || 'Imóvel')}</span><span>${esc(statusText(item.captureStatus || item.status))}</span><span>${item.processCount || 0} processo(s)</span><span>v${Number(item.version || 1)}</span></div>
+        <fieldset><legend>Identificação do imóvel</legend><div class="form-grid three">
+          <label>Código interno<input name="code" maxlength="100" value="${esc(item.code || '')}"></label>
+          <label>Matrícula<input name="registration" maxlength="150" value="${esc(item.registration || '')}"></label>
+          <label>Inscrição/IPTU<input name="iptu" maxlength="150" value="${esc(item.iptu || '')}"></label>
+          <label>Tipo do imóvel<input name="type" maxlength="150" value="${esc(item.type || '')}"></label>
+          <label>Modalidade da captação<input name="captureMode" maxlength="150" value="${esc(item.captureMode || '')}"></label>
+          <label>Status da captação<input name="captureStatus" maxlength="100" value="${esc(item.captureStatus || '')}"></label>
+          <label>Autorização Rycky de Palmer<input name="authorizationRyckyPalmer" maxlength="100" value="${esc(item.authorizationRyckyPalmer || '')}"></label>
+        </div></fieldset>
+        <fieldset><legend>Endereço</legend><div class="form-grid three">
+          <label class="span-2">Endereço completo<input name="address" maxlength="1000" value="${esc(item.address || '')}"></label>
+          <label>CEP<input name="zip" data-mask="cep" value="${esc(address.zip || '')}"></label>
+          <label class="span-2">Rua<input name="street" maxlength="200" value="${esc(address.street || '')}"></label>
+          <label>Número<input name="number" maxlength="50" value="${esc(address.number || '')}"></label>
+          <label>Bairro<input name="district" maxlength="150" value="${esc(address.district || '')}"></label>
+          <label>Complemento<input name="complement" maxlength="150" value="${esc(address.complement || '')}"></label>
+          <label>Cidade<input name="city" maxlength="150" value="${esc(address.city || '')}"></label>
+          <label>Estado<input name="state" maxlength="80" value="${esc(address.state || '')}"></label>
+        </div><label>Observações<textarea name="observations" maxlength="5000">${esc(item.data?.observacoes || '')}</textarea></label></fieldset>`;
+      $$('input,textarea,select', form).forEach(control => { if (!['id','expectedVersion'].includes(control.name)) control.disabled = !canEdit; });
+      $('#property-record-save').classList.toggle('hidden', !canEdit);
+    } catch (error) { $('#property-record-content').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`; }
+  }
+
+  async function submitPropertyRecord(event) {
+    event.preventDefault();
+    const form=event.currentTarget;
+    const button=$('#property-record-save');
+    const data=formObject(form);
+    data.addressData={zip:data.zip,street:data.street,number:data.number,district:data.district,complement:data.complement,city:data.city,state:data.state};
+    const mutationId=requestId();
+    setBusy(button,true,'Salvando...');
+    try{
+      await api('apiSalvarCadastroImovel',state.token,data,{...state.context,requestId:mutationId});
+      closeModal(true);
+      toast('Cadastro do imóvel atualizado e auditado.','success');
+      await loadPropertyDatabase(state.database.propertyPage);
+    }catch(error){toast(error.message,'error');}
+    finally{setBusy(button,false);}
+  }
+
   function renderProcesses(target, items) {
     if (!items?.length) {
       target.innerHTML = '<div class="empty-state"><strong>Nenhum processo encontrado.</strong><br>Crie um novo processo ou altere os filtros.</div>';
@@ -733,8 +991,9 @@
   function showView(view) {
     $$('.nav-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.view === view));
     $$('.app-view').forEach(section => section.classList.toggle('active', section.id === `${view}-view`));
-    $('#view-title').textContent = ({dashboard:'Painel administrativo',processes:'Processos',contracts:'Contratos',admin:'Administração'}[view]);
+    $('#view-title').textContent = ({dashboard:'Painel administrativo',processes:'Processos',database:'Data Base — Carta de Clientes',contracts:'Contratos',admin:'Administração'}[view]);
     if (view === 'processes') loadProcesses('processes');
+    if (view === 'database') loadDatabase();
     if (view === 'contracts') loadContracts();
     if (view === 'admin') loadAdmin();
   }
@@ -811,9 +1070,22 @@
       toast('Troque a senha temporária para continuar.', 'error');
       return false;
     }
+    if (!force && currentModal === 'database-match-modal') {
+      closeDatabaseMatch();
+      return true;
+    }
     if (!force && currentModal === 'process-modal' && state.processDraftDirty) {
       saveShortProcessDraft();
-      if (!confirm('Existem dados ainda não enviados. O rascunho ficará disponível nesta aba por 30 minutos. Deseja fechar a ficha?')) return false;
+      if (!confirm('Existem dados ainda não enviados. O rascunho ficará disponível nesta aba por 10 minutos. Deseja fechar a ficha?')) return false;
+    }
+    if (!force && currentModal === 'process-modal' && state.processFormMode === 'edit' && state.currentProcess) {
+      state.processFormMode = 'create';
+      state.processEditId = '';
+      state.processEditExpectedVersion = 0;
+      state.processDraftDirty = false;
+      $('#new-process-type').disabled = false;
+      openModal('detail-modal');
+      return true;
     }
     if (!force && state.currentProcess && ['workflow-modal','participant-modal','proposal-modal','proposal-accept-modal'].includes(currentModal)) {
       openModal('detail-modal');
@@ -832,6 +1104,13 @@
   }
 
   async function openNewProcess() {
+    state.processFormMode = 'create';
+    state.processEditId = '';
+    state.processEditExpectedVersion = 0;
+    $('#new-process-type').disabled = false;
+    $('#process-modal-eyebrow').textContent = 'NOVO PROCESSO';
+    $('#process-modal-title').textContent = 'Criar processo';
+    $('#process-submit-btn').textContent = 'Próxima etapa: documentos →';
     if (!resetForm('#process-form')) return;
     $('#dynamic-process-form').innerHTML = '<div class="empty-state">Selecione o tipo de processo para carregar o formulário.</div>';
     $('#income-acceptance-panel').classList.add('hidden');
@@ -849,6 +1128,33 @@
       state.processDraftDirty = false;
       updateShortProcessDraftStatus('', false);
     }
+  }
+
+  async function openEditProcess() {
+    if (!state.currentProcess?.process?.id || !state.currentProcess?.capabilities?.edit) {
+      return toast('Você não possui permissão para editar esta ficha.', 'error');
+    }
+    if (!state.processLoadedTabs.has('registration')) await ensureProcessTab('registration');
+    const detail = state.currentProcess;
+    const form = resetForm('#process-form');
+    if (!form) return;
+    state.processFormMode = 'edit';
+    state.processEditId = detail.process.id;
+    state.processEditExpectedVersion = Number(detail.process.version || detail.processTabVersion || 0);
+    $('#process-modal-eyebrow').textContent = `EDIÇÃO CONTROLADA · ${detail.process.protocol}`;
+    $('#process-modal-title').textContent = 'Editar ficha cadastral';
+    $('#process-submit-btn').textContent = 'Salvar alterações';
+    $('#new-process-type').value = detail.process.type;
+    $('#new-process-type').disabled = true;
+    openModal('process-modal');
+    const draft = readShortProcessDraft(detail.process.type, detail.process.id);
+    await loadDynamicForm(detail.process.type, draft?.data || detail.data || {});
+    $('#income-acceptance-check').checked = Boolean(draft?.incomeAccepted || String((draft?.data || detail.data || {}).aceite_renda_insuficiente || '').toUpperCase() === 'SIM');
+    state.processDraftDirty = Boolean(draft);
+    updateShortProcessDraftStatus(draft
+      ? `Rascunho de edição recuperado, salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})}.`
+      : 'A ficha original permanece preservada até a confirmação desta edição.', Boolean(draft));
+    updateIncomeAffordability();
   }
 
   async function loadDynamicForm(type, values = {}) {
@@ -1028,6 +1334,47 @@
     }
   }
 
+  function maskMasterDocument(input) {
+    const form=input.closest('#customer-record-form');
+    const type=formControl(form,'personType')?.value||'PF';
+    const digits=input.value.replace(/\D/g,'');
+    input.value=type==='PJ'
+      ? digits.slice(0,14).replace(/(\d{2})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1/$2').replace(/(\d{4})(\d{1,2})$/,'$1-$2')
+      : digits.slice(0,11).replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');
+    input.setCustomValidity(type==='PJ'?(digits.length&&!cnpjIsValid(digits)?'CNPJ inválido.':''):(digits.length&&!cpfIsValid(digits)?'CPF inválido.':''));
+  }
+
+  function scheduleParticipantDatabaseLookup(input) {
+    const form=input?.closest('#participant-form');
+    if(!form)return;
+    const type=formControl(form,'personType')?.value||'PF';
+    const digits=input.value.replace(/\D/g,'');
+    const valid=type==='PJ'?cnpjIsValid(digits):cpfIsValid(digits);
+    if(!valid){input.dataset.databaseChecked='';return;}
+    if(input.dataset.databaseChecked===digits)return;
+    clearTimeout(state.databaseLookupTimer);
+    state.databaseLookupTimer=setTimeout(async()=>{
+      if(input.value.replace(/\D/g,'')!==digits||input.dataset.databaseChecked===digits)return;
+      try{
+        const result=await api('apiBuscarCadastroPorDocumento',state.token,digits,state.context);
+        input.dataset.databaseChecked=digits;
+        if(!result.found||activeModalId()!=='participant-modal')return;
+        if(!confirm(`Encontramos ${result.item.name} na Carta de Clientes. Deseja preencher os campos vazios deste participante?`))return;
+        const item=result.item,address=item.address||{};
+        const values={personType:item.personType,document:item.document,name:item.name,tradeName:item.tradeName,rgIe:item.rgIe,
+          birthOpening:item.birthOpening,legalRepresentative:item.legalRepresentative,nationality:item.nationality,
+          maritalStatus:item.maritalStatus,propertyRegime:item.propertyRegime,profession:item.profession,
+          income:item.income?formatBRL(item.income):'',employer:item.employer,job:item.job,email:item.email,phone:item.phone,
+          zip:address.zip,street:address.street,number:address.number,district:address.district,complement:address.complement,
+          city:address.city,state:address.state};
+        let changed=0;
+        Object.entries(values).forEach(([name,value])=>{const control=formControl(form,name);if(control&&value&&!String(control.value||'').trim()){control.value=value;if(control.dataset.mask)maskValue(control);changed+=1;}});
+        maskParticipantDocument(input);
+        toast(`${changed} campo(s) do participante preenchido(s). Revise antes de salvar.`,'success');
+      }catch(error){input.dataset.databaseChecked='';toast(error.message,'error');}
+    },450);
+  }
+
   function validateCpfField(input) {
     if (!input) return false;
     const digits = input.value.replace(/\D/g,'');
@@ -1048,6 +1395,121 @@
     invalid.focus();
     invalid.reportValidity();
     return false;
+  }
+
+  function processPartyTargets() {
+    const labels = {cliente:'Cliente / comprador / locatário', titular:'Proprietário / vendedor', proprietario:'Proprietário', vendedor:'Vendedor'};
+    const found = new Map();
+    $$('[name$="_cpf"]', $('#dynamic-process-form')).forEach(input => {
+      const prefix = input.name.replace(/_cpf$/, '');
+      found.set(prefix, labels[prefix] || input.closest('.semantic-form-section')?.querySelector('header p')?.textContent || statusText(prefix));
+    });
+    return Array.from(found, ([value, label]) => ({value, label}));
+  }
+
+  function scheduleCustomerDatabaseLookup(input) {
+    if (!input?.matches('[data-mask="cpf"]')) return;
+    const digits = input.value.replace(/\D/g, '');
+    if (!cpfIsValid(digits)) {
+      input.dataset.databaseChecked = '';
+      clearTimeout(state.databaseLookupTimer);
+      return;
+    }
+    if (input.dataset.databaseChecked === digits) return;
+    clearTimeout(state.databaseLookupTimer);
+    const nonce = ++state.databaseLookupNonce;
+    state.databaseLookupTimer = setTimeout(async () => {
+      if (input.value.replace(/\D/g, '') !== digits || input.dataset.databaseChecked === digits) return;
+      try {
+        const result = await api('apiBuscarCadastroPorDocumento', state.token, digits, state.context);
+        input.dataset.databaseChecked = digits;
+        if (nonce !== state.databaseLookupNonce || !result.found || activeModalId() !== 'process-modal') return;
+        const targets = processPartyTargets();
+        const inferred = input.name.replace(/_cpf$/, '');
+        state.databaseMatch = {item:result.item, returnModal:'process-modal', sourceInput:input, inferredTarget:inferred};
+        $('#database-match-message').textContent = 'Notamos que o CPF informado possui registro em nossa base de dados. Deseja usar as informações nele contidas para preencher este processo?';
+        $('#database-match-summary').innerHTML = `<strong>${esc(result.item.name || 'Cadastro localizado')}</strong><span>${esc(result.item.document || '')}</span><span>${esc((result.item.roles || []).map(statusText).join(' · ') || 'Cadastro geral')}</span>`;
+        $('#database-match-target').innerHTML = targets.map(target => `<option value="${esc(target.value)}" ${target.value === inferred ? 'selected' : ''}>${esc(target.label)}</option>`).join('');
+        $('#database-match-overwrite').checked = false;
+        openModal('database-match-modal');
+      } catch (error) {
+        input.dataset.databaseChecked = '';
+        if (!['INVALID_DOCUMENT','NOT_FOUND'].includes(error.code)) toast(error.message, 'error');
+      }
+    }, 450);
+  }
+
+  function closeDatabaseMatch() {
+    const returnModal = state.databaseMatch?.returnModal || 'process-modal';
+    state.databaseMatch = null;
+    openModal(returnModal);
+  }
+
+  function applyDatabaseMatch() {
+    const match = state.databaseMatch;
+    if (!match?.item) return closeDatabaseMatch();
+    const prefix = $('#database-match-target').value || match.inferredTarget;
+    const overwrite = $('#database-match-overwrite').checked;
+    const item = match.item;
+    const address = item.address || {};
+    const values = {
+      nome:item.name, cpf:item.document, nascimento:item.birthOpening, documento:item.rgIe,
+      orgao_expedidor:item.issuer, nacionalidade:item.nationality, estado_civil:item.maritalStatus,
+      regime_bens:item.propertyRegime, profissao:item.profession, renda:item.income ? formatBRL(item.income) : '',
+      renda_origem:item.incomeOrigin, empresa:item.employer, cargo:item.job, funcao:item.job,
+      email:item.email, contato:item.phone, contato_recado:item.messagePhone,
+      contato_recado_nome:item.messageContactName, rua:address.street, numero:address.number,
+      bairro:address.district, complemento:address.complement, cidade:address.city,
+      estado:address.state, cep:address.zip
+    };
+    let changed = 0;
+    Object.entries(values).forEach(([suffix, value]) => {
+      if (value == null || value === '') return;
+      const control = $(`[name="${CSS.escape(`${prefix}_${suffix}`)}"]`, $('#dynamic-process-form'));
+      if (!control || (!overwrite && String(control.value || '').trim())) return;
+      control.value = value;
+      if (control.dataset.mask) maskValue(control);
+      changed += 1;
+    });
+    const cpfControl = $(`[name="${CSS.escape(`${prefix}_cpf`)}"]`, $('#dynamic-process-form'));
+    if (cpfControl) cpfControl.dataset.databaseChecked = String(item.document || '').replace(/\D/g, '');
+    updateConditionalFields();
+    updateIncomeAffordability();
+    scheduleShortProcessDraftSave();
+    closeDatabaseMatch();
+    toast(`${changed} campo(s) preenchido(s). Você pode revisar e editar qualquer informação antes de salvar.`, 'success');
+  }
+
+  function schedulePropertyDatabaseLookup(input) {
+    if (!input || input.name !== 'imovel_codigo') return;
+    const identifier = String(input.value || '').trim();
+    if (identifier.length < 2) { input.dataset.propertyChecked = ''; return; }
+    if (input.dataset.propertyChecked === identifier) return;
+    clearTimeout(state.propertyLookupTimer);
+    state.propertyLookupTimer = setTimeout(async () => {
+      if (input.value.trim() !== identifier || input.dataset.propertyChecked === identifier) return;
+      input.dataset.propertyChecked = identifier;
+      try {
+        const result = await api('apiBuscarImovelPorIdentificador', state.token, identifier, state.context);
+        if (!result.found || activeModalId() !== 'process-modal') return;
+        if (!confirm(`O imóvel ${result.item.code || result.item.registration || result.item.id} já existe na base. Deseja usar seus dados para preencher esta ficha?`)) return;
+        const item = result.item;
+        const address = item.addressData || {};
+        const values = {imovel_codigo:item.code, imovel_matricula:item.registration, imovel_iptu:item.iptu, tipo_imovel:item.type,
+          imovel_endereco:item.address, imovel_rua:address.street, imovel_numero:address.number, imovel_bairro:address.district,
+          imovel_complemento:address.complement, imovel_cidade:address.city, imovel_estado:address.state, imovel_cep:address.zip};
+        let changed = 0;
+        Object.entries(values).forEach(([name, value]) => {
+          const control = $(`[name="${CSS.escape(name)}"]`, $('#dynamic-process-form'));
+          if (!control || !value || String(control.value || '').trim()) return;
+          control.value = value;
+          if (control.dataset.mask) maskValue(control);
+          changed += 1;
+        });
+        scheduleShortProcessDraftSave();
+        toast(`${changed} dado(s) do imóvel reutilizado(s). Todos permanecem editáveis.`, 'success');
+      } catch (error) { if (error.code !== 'NOT_FOUND') toast(error.message, 'error'); }
+    }, 600);
   }
 
   function parseCurrencyText(value) {
@@ -1098,6 +1560,30 @@
         return toast('Confirme o aceite eletrônico sobre a renda antes de prosseguir.', 'error');
       }
       data.aceite_renda_insuficiente = 'SIM';
+    }
+    if (state.processFormMode === 'edit') {
+      const processId = state.processEditId;
+      const expectedVersion = state.processEditExpectedVersion;
+      setBusy(button, true, 'Salvando alterações...');
+      try {
+        const mutationId = requestId();
+        const result = await api('apiAtualizarProcesso', state.token, processId, data, {
+          ...state.context,
+          expectedVersion,
+          requestId: mutationId
+        });
+        clearShortProcessDraft(type, processId);
+        state.processFormMode = 'create';
+        state.processEditId = '';
+        state.processEditExpectedVersion = 0;
+        $('#new-process-type').disabled = false;
+        closeModal(true);
+        toast(`Ficha atualizada com segurança para a versão ${result.version}.`, 'success');
+        await Promise.all([loadProcesses('dashboard'), openProcess(processId, 'registration')]);
+      } catch (error) {
+        toast(error.message, 'error');
+      } finally { setBusy(button, false); }
+      return;
     }
     const temp = {
       id:`temp-${Date.now()}`,protocol:'SALVANDO',clientName:data.cliente_nome,typeLabel:state.bootstrap.processTypes.find(item=>item.value===type)?.label,
@@ -1356,6 +1842,7 @@
     tools.push(`<button type="button" class="process-action-tool ${state.processDetailTab==='review'?'active':''}" data-process-detail-tab="review"><span>✓</span>Revisão</button>`);
     tools.push(`<button type="button" class="process-action-tool ${state.processDetailTab==='audit'?'active':''}" data-process-detail-tab="audit"><span>⌁</span>Auditoria</button>`);
     tools.push('<button type="button" class="process-action-tool" data-download-registration-sheet><span>⇩</span>Ficha</button>');
+    if (capabilities.edit && !locked) tools.push('<button type="button" class="process-action-tool" data-edit-process><span>✎</span>Editar ficha</button>');
     if (capabilities.upload && !locked) tools.push('<button type="button" class="process-action-tool" data-process-detail-tab="documents"><span>＋</span>Documento</button>');
     if (capabilities.edit && !locked) tools.push('<button type="button" class="process-action-tool" data-add-participant><span>♙+</span>Participante</button>');
     if (capabilities.manageProposal && !locked) tools.push('<button type="button" class="process-action-tool" data-add-proposal><span>◇+</span>Proposta</button>');
@@ -1434,15 +1921,18 @@
 
   function renderVisualDocumentCard(doc, canPreview) {
     const isImage = String(doc.mimeType || '').startsWith('image/');
-    const canLoadPreview = canPreview && previewSupported(doc.mimeType);
+    const uploadPending = String(doc.mediaStatus || '').toUpperCase() === 'UPLOAD_PENDING';
+    const canLoadPreview = canPreview && !uploadPending && previewSupported(doc.mimeType);
     const previewAttrs = canLoadPreview ? `data-preview-doc="${esc(doc.id)}" tabindex="0" role="button" aria-label="Ampliar ${esc(doc.fileName)}"` : '';
-    const media = isImage
+    const media = uploadPending
+      ? `<div class="visual-image-placeholder upload-pending"><span>…</span><small>Envio pendente</small></div>`
+      : isImage
       ? `<div class="visual-image-placeholder" data-visual-thumbnail="${esc(doc.id)}"><span>IMG</span><small>Carregando prévia...</small></div>`
       : `<div class="visual-pdf-page" data-visual-thumbnail="${esc(doc.id)}"><span class="visual-pdf-badge">PDF</span><i></i><i></i><i></i><strong>${esc(doc.name)}</strong></div>`;
-    return `<article class="visual-doc-card ${isImage?'is-image':'is-pdf'}" data-visual-document="${esc(doc.id)}" data-document-mime="${esc(doc.mimeType)}" ${isImage?'data-image-document="true"':''}>
+    return `<article class="visual-doc-card ${isImage?'is-image':'is-pdf'} ${uploadPending?'media-upload-pending':''}" data-visual-document="${esc(doc.id)}" data-document-mime="${esc(doc.mimeType)}" ${isImage?'data-image-document="true"':''}>
       <div class="visual-doc-media" ${previewAttrs}>${media}${canLoadPreview?'<span class="visual-open-hint">↗ Ampliar</span>':''}</div>
       <div class="visual-doc-body"><div class="visual-doc-kind"><span>${isImage?'IMAGEM':'PDF'}</span><small>v${esc(doc.version)}</small></div><strong title="${esc(doc.fileName)}">${esc(doc.fileName)}</strong><p>${esc(doc.name)}</p><div class="visual-doc-meta"><span>◷ ${dateText(doc.createdAt)}</span><span>● ${esc(doc.uploadedBy || '—')}</span></div></div>
-      <footer class="visual-doc-actions">${canLoadPreview?`<button type="button" class="link-btn" data-load-visual-thumb="${esc(doc.id)}">Carregar miniatura</button>`:''}${canLoadPreview?`<button type="button" class="link-btn" data-preview-doc="${esc(doc.id)}">Ver</button>`:''}${canPreview?`<button type="button" class="link-btn" data-download-doc="${esc(doc.id)}">Baixar</button>`:''}</footer>
+      <footer class="visual-doc-actions">${uploadPending?'<span class="muted">Selecione o mesmo arquivo para retomar o envio.</span>':''}${canLoadPreview?`<button type="button" class="link-btn" data-load-visual-thumb="${esc(doc.id)}">Carregar miniatura</button>`:''}${canLoadPreview?`<button type="button" class="link-btn" data-preview-doc="${esc(doc.id)}">Ver</button>`:''}${canPreview&&!uploadPending?`<button type="button" class="link-btn" data-download-doc="${esc(doc.id)}">Baixar</button>`:''}</footer>
     </article>`;
   }
 
@@ -1473,6 +1963,13 @@
   }
 
   function visualThumbnailMessage(file, isPdf) {
+    if (file?.errorCode === 'CLOUD_UPLOAD_PENDING') {
+      return {
+        state:'pending',
+        label:'Envio pendente',
+        title:file.message || 'O envio ainda não foi concluído.'
+      };
+    }
     if (file?.errorCode === 'DOCUMENT_FILE_UNAVAILABLE') {
       const account = file.deploymentAccount ? ` Conta atual: ${file.deploymentAccount}.` : '';
       return {
@@ -2036,10 +2533,17 @@
     const statusClass = doc.uploaded ? 'status-APROVADO' : doc.required ? 'status-PENDENTE' : 'document-status-optional';
     const groupText = doc.requirementGroup === 'COMPROVACAO_RENDA' ? ' · uma das opções de comprovação de renda' : '';
     const acceptedTypes = acceptedDocumentMimeTypes(doc.mimeTypes);
-    const cloudPdfLimit = mediaCloudEnabled() ? Number(state.bootstrap?.config?.MEDIA_MAX_PDF_SOURCE_MB || 100) : 0;
-    const limitText = cloudPdfLimit && acceptedTypes.includes('application/pdf')
-      ? `até ${esc(doc.maxMb)} MB para imagens e ${esc(cloudPdfLimit)} MB para PDFs`
-      : `até ${esc(doc.maxMb)} MB cada`;
+    const hasPdf = acceptedTypes.includes('application/pdf');
+    const hasImage = acceptedTypes.includes('image/');
+    const cloudPdfLimit = mediaCloudEnabled() && hasPdf ? cloudUploadLimitMb('application/pdf', doc.maxMb) : 0;
+    const cloudImageLimit = mediaCloudEnabled() && hasImage ? cloudUploadLimitMb('image/jpeg', doc.maxMb) : 0;
+    const limitText = cloudPdfLimit && cloudImageLimit
+      ? `até ${esc(cloudImageLimit)} MB para imagens e ${esc(cloudPdfLimit)} MB para PDFs`
+      : cloudPdfLimit
+        ? `até ${esc(cloudPdfLimit)} MB por PDF`
+        : cloudImageLimit
+          ? `até ${esc(cloudImageLimit)} MB por imagem`
+          : `até ${esc(doc.maxMb)} MB cada`;
     return `<form class="document-card" data-document-upload="${esc(doc.id)}" data-document-key="${esc(key)}" data-max-mb="${esc(doc.maxMb)}" data-mime-types="${esc(acceptedTypes)}">
       <div class="document-card-head"><div><strong>${esc(doc.name)}</strong><small class="muted">${doc.required?'Obrigatório neste processo':'Opcional neste processo'}${groupText} · vários arquivos permitidos · ${limitText}</small></div><span class="status-badge ${statusClass}">${esc(status)}</span></div>
       ${canUpload ? `<div class="document-dropzone" data-document-dropzone tabindex="0" role="button" aria-label="Selecionar ou arrastar ${esc(doc.name)}"><input class="document-file-input" type="file" name="file" accept="${esc(acceptedTypes)}" tabindex="-1" multiple><span class="dropzone-icon">↑</span><span><strong>Arraste quantos arquivos precisar</strong><small>ou clique para selecionar vários de uma vez · imagens são otimizadas sem reduzir a resolução</small></span></div>
@@ -2069,7 +2573,7 @@
     if (!ordered.length) return '<div class="documents-empty"><strong>Nenhum documento enviado.</strong><span>Os arquivos enviados aparecerão aqui com nome, data, hora e usuário.</span></div>';
     const canDownload = Boolean(state.currentProcess?.capabilities?.download);
     const canCheck = Boolean(state.currentProcess?.capabilities?.checkDocument && state.currentProcess?.workflow?.actions?.reviewDocuments);
-    return `<div class="uploaded-documents"><div class="uploaded-documents-title"><strong>Histórico de arquivos</strong><span>Mais recentes primeiro</span></div><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Documento</th><th>Arquivo</th><th>Conferência</th><th>Versão</th><th>Enviado por</th><th>Data e hora</th><th>Ações</th></tr></thead><tbody>${ordered.map(doc => `<tr data-document-row="${esc(doc.id)}"><td>${esc(doc.name)}</td><td><strong>${esc(doc.fileName)}</strong><br><small>${esc(fileSizeText(doc.size))}</small></td><td><span class="status-badge status-${esc(doc.reviewStatus)}">${esc(statusText(doc.reviewStatus))}</span>${doc.reviewStatus==='CONFERIDO'?`<br><small class="inline-ok-proof">✓ OK por ${esc(doc.reviewedBy || 'responsável')}</small>`:''}${doc.pendingReason?`<br><small>${esc(doc.pendingReason)}</small>`:''}</td><td>v${esc(doc.version)}</td><td>${esc(doc.uploadedBy)}</td><td>${dateText(doc.createdAt)}</td><td><div class="table-actions">${canDownload && previewSupported(doc.mimeType)?`<button class="link-btn" data-preview-doc="${esc(doc.id)}">Prévia</button>`:''}${canDownload?`<button class="link-btn" data-download-doc="${esc(doc.id)}">Baixar</button>`:''}${canRemoveUploadedDocument(doc)?`<button class="link-btn danger" data-delete-doc="${esc(doc.id)}">Remover</button>`:''}${canCheck&&doc.reviewStatus!=='CONFERIDO'&&doc.reviewStatus!=='SUBSTITUIDO'?`<button class="btn success compact" data-check-document="${esc(doc.id)}">✓ OK documento</button><button class="link-btn danger" data-pend-document="${esc(doc.id)}">Pendenciar</button>`:''}</div></td></tr>`).join('')}</tbody></table></div>${canCheck?'<div class="uploaded-documents-footer"><button class="btn success compact" data-check-all-documents>✓ Dar OK nos documentos válidos</button></div>':''}</div>`;
+    return `<div class="uploaded-documents"><div class="uploaded-documents-title"><strong>Histórico de arquivos</strong><span>Mais recentes primeiro</span></div><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Documento</th><th>Arquivo</th><th>Conferência</th><th>Versão</th><th>Enviado por</th><th>Data e hora</th><th>Ações</th></tr></thead><tbody>${ordered.map(doc => { const pending=String(doc.mediaStatus||'').toUpperCase()==='UPLOAD_PENDING'; return `<tr data-document-row="${esc(doc.id)}"><td>${esc(doc.name)}</td><td><strong>${esc(doc.fileName)}</strong><br><small>${esc(fileSizeText(doc.size))}${pending?' · envio pendente':''}</small></td><td>${pending?'<span class="status-badge status-PENDENTE">ENVIO PENDENTE</span>':`<span class="status-badge status-${esc(doc.reviewStatus)}">${esc(statusText(doc.reviewStatus))}</span>${doc.reviewStatus==='CONFERIDO'?`<br><small class="inline-ok-proof">✓ OK por ${esc(doc.reviewedBy || 'responsável')}</small>`:''}${doc.pendingReason?`<br><small>${esc(doc.pendingReason)}</small>`:''}`}</td><td>v${esc(doc.version)}</td><td>${esc(doc.uploadedBy)}</td><td>${dateText(doc.createdAt)}</td><td><div class="table-actions">${canDownload&&!pending&&previewSupported(doc.mimeType)?`<button class="link-btn" data-preview-doc="${esc(doc.id)}">Prévia</button>`:''}${canDownload&&!pending?`<button class="link-btn" data-download-doc="${esc(doc.id)}">Baixar</button>`:''}${canRemoveUploadedDocument(doc)?`<button class="link-btn danger" data-delete-doc="${esc(doc.id)}">Remover</button>`:''}${canCheck&&!pending&&doc.reviewStatus!=='CONFERIDO'&&doc.reviewStatus!=='SUBSTITUIDO'?`<button class="btn success compact" data-check-document="${esc(doc.id)}">✓ OK documento</button><button class="link-btn danger" data-pend-document="${esc(doc.id)}">Pendenciar</button>`:''}</div></td></tr>`; }).join('')}</tbody></table></div>${canCheck?'<div class="uploaded-documents-footer"><button class="btn success compact" data-check-all-documents>✓ Dar OK nos documentos válidos</button></div>':''}</div>`;
   }
 
   function renderDocumentUploadStep(detail) {
@@ -2349,16 +2853,47 @@
     finally{if(button.isConnected)setBusy(button,false);}
   }
 
-  async function editContractModel(id) {
+  function renderContractClauseEditor(clauses) {
+    const target = $('#contract-model-clauses');
+    target.innerHTML = (clauses || []).map((clause,index)=>`<div class="contract-clause-row" data-contract-clause-row><label>Ordem<input value="${esc((index+1)*10)}" disabled></label><label>Título<input name="clauseTitle" minlength="3" maxlength="200" value="${esc(clause.title||'')}" required></label><label>Texto<textarea name="clauseText" minlength="10" maxlength="12000" required>${esc(clause.text||'')}</textarea></label><button type="button" class="icon-btn" data-remove-contract-clause title="Remover cláusula">×</button></div>`).join('');
+  }
+
+  function addContractClause() {
+    const clauses = $$('[data-contract-clause-row]').map(row=>({
+      title:$('input[name="clauseTitle"]',row)?.value||'', text:$('textarea[name="clauseText"]',row)?.value||''
+    }));
+    clauses.push({title:'Nova cláusula',text:'Edite o texto desta cláusula antes de salvar a nova versão.'});
+    renderContractClauseEditor(clauses);
+    $('[data-contract-clause-row]:last-child input[name=clauseTitle]')?.focus();
+  }
+
+  function editContractModel(id) {
     const model=state.admin?.contractModels?.find(item=>item.id===id);
     if(!model)return;
-    const title=prompt('Título do contrato:',model.title);
-    if(title===null)return;
-    const approved=confirm('Clique em OK somente se houve aprovação jurídica formal. Cancelar mantém “Em revisão jurídica”.');
-    const watermark=prompt('Marca d’água:',model.watermark||'PALMER IMÓVEIS');
-    if(watermark===null)return;
-    try {await api('apiSalvarModeloContrato',state.token,{id,title,watermark,legalStatus:approved?'APROVADO_JURIDICO':'EM_REVISAO_JURIDICA'},state.context);toast('Modelo contratual versionado.','success');await loadAdmin();}
+    const form=resetForm('#contract-model-form');
+    formControl(form,'id').value=model.id;
+    formControl(form,'title').value=model.title||'';
+    formControl(form,'watermark').value=model.watermark||'PALMER IMÓVEIS';
+    formControl(form,'legalStatus').value=model.legalStatus||'EM_REVISAO_JURIDICA';
+    renderContractClauseEditor(model.clauses||[]);
+    $('#contract-model-modal-title').textContent=`${model.name} · nova versão v${Number(model.version||1)+1}`;
+    openModal('contract-model-modal');
+  }
+
+  async function submitContractModel(event) {
+    event.preventDefault();
+    const form=event.currentTarget;
+    const button=$('button[type=submit]',form);
+    const data=formObject(form);
+    data.clauses=$$('[data-contract-clause-row]',form).map(row=>({
+      title:($('input[name="clauseTitle"]',row)?.value||'').trim(), text:($('textarea[name="clauseText"]',row)?.value||'').trim()
+    }));
+    if(!data.clauses.length)return toast('Adicione ao menos uma cláusula.','error');
+    if(data.legalStatus==='APROVADO_JURIDICO'&&!confirm('Confirma que esta versão recebeu aprovação jurídica formal?'))return;
+    setBusy(button,true,'Versionando...');
+    try {await api('apiSalvarModeloContrato',state.token,data,state.context);closeModal();toast('Nova versão contratual preservada e auditada.','success');await loadAdmin('models',true);}
     catch(error){toast(error.message,'error');}
+    finally{setBusy(button,false);}
   }
 
   function openParticipantModal(id = '') {
@@ -2687,14 +3222,12 @@
       const mimeType = String(file.type || '').toLowerCase();
       const signature = `${preparedFile.originalName}|${preparedFile.originalSize}|${file.lastModified}`;
       const isPdf = mimeType === 'application/pdf';
-      const pdfLimitMb = mediaCloudEnabled()
-        ? Number(state.bootstrap?.config?.MEDIA_MAX_PDF_SOURCE_MB || 100)
-        : Number(state.bootstrap?.config?.MAX_PDF_SIZE_MB || maxMb || 0);
-      const effectiveMaxBytes = isPdf && pdfLimitMb
-        ? (mediaCloudEnabled()
-          ? pdfLimitMb * 1024 * 1024
-          : Math.min(maxBytes || Number.POSITIVE_INFINITY, pdfLimitMb * 1024 * 1024))
-        : maxBytes;
+      const configuredLimitMb = mediaCloudEnabled()
+        ? cloudUploadLimitMb(mimeType, maxMb)
+        : isPdf
+          ? Math.min(maxMb || Number.POSITIVE_INFINITY, Number(state.bootstrap?.config?.MAX_PDF_SIZE_MB || maxMb || 0))
+          : maxMb;
+      const effectiveMaxBytes = configuredLimitMb ? configuredLimitMb * 1024 * 1024 : maxBytes;
       const invalidPdf = isPdf && (
         !/\.pdf$/i.test(String(file.name || '')) ||
         String(file.name || '').length > 200 ||
@@ -2789,6 +3322,28 @@
       : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     const digest = await crypto.subtle.digest('SHA-256', source);
     return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function sha256FileInWorker(file) {
+    if (!globalThis.Worker || !globalThis.Blob || !globalThis.URL?.createObjectURL) {
+      return sha256Hex(new Uint8Array(await file.arrayBuffer()));
+    }
+    const workerSource = `self.onmessage=async(e)=>{try{const b=await e.data.arrayBuffer();const d=await crypto.subtle.digest('SHA-256',b);const h=Array.from(new Uint8Array(d),v=>v.toString(16).padStart(2,'0')).join('');self.postMessage({ok:true,hash:h});}catch(error){self.postMessage({ok:false,message:error&&error.message||'HASH_FAILED'});}};`;
+    const workerUrl = URL.createObjectURL(new Blob([workerSource], {type:'text/javascript'}));
+    try {
+      return await new Promise((resolve,reject)=>{
+        const worker = new Worker(workerUrl);
+        const timer = setTimeout(()=>{worker.terminate();reject(new Error('O cálculo de integridade demorou além do limite seguro.'));},120000);
+        worker.onmessage=event=>{clearTimeout(timer);worker.terminate();event.data?.ok?resolve(event.data.hash):reject(new Error(event.data?.message||'Falha no cálculo de integridade.'));};
+        worker.onerror=event=>{clearTimeout(timer);worker.terminate();reject(new Error(event.message||'Falha no cálculo de integridade.'));};
+        worker.postMessage(file);
+      });
+    } catch (error) {
+      if (Number(file.size || 0) > 25 * 1024 * 1024) throw new Error('Este navegador não conseguiu validar o arquivo pesado em segundo plano. Atualize o navegador e tente novamente.');
+      return sha256Hex(new Uint8Array(await file.arrayBuffer()));
+    } finally {
+      URL.revokeObjectURL(workerUrl);
+    }
   }
 
   async function documentFromCache(id, identity) {
@@ -3274,6 +3829,21 @@
     return configured === true || ['SIM','TRUE'].includes(String(configured || '').toUpperCase());
   }
 
+  function cloudUploadLimitMb(mimeType, catalogLimitMb = 0) {
+    const isPdf = String(mimeType || '').toLowerCase() === 'application/pdf';
+    const configured = isPdf
+      ? Number(state.bootstrap?.config?.MEDIA_MAX_PDF_SOURCE_MB || 100)
+      : Number(state.bootstrap?.config?.MEDIA_MAX_UPLOAD_MB || 25);
+    const absoluteMaximum = isPdf ? 100 : 25;
+    let limit = Math.min(Math.max(configured, 1), absoluteMaximum);
+    const catalogLimit = Number(catalogLimitMb || 0);
+    const legacyDirectLimit = 6;
+    if (Number.isFinite(catalogLimit) && catalogLimit > 0 && catalogLimit !== legacyDirectLimit) {
+      limit = Math.min(limit, catalogLimit);
+    }
+    return limit;
+  }
+
   async function mediaApiRequest(baseUrl, path, options = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Number(options.timeoutMs || 60000));
@@ -3344,10 +3914,11 @@
     let dispose = () => {};
     try {
       if (mimeType === 'application/pdf') {
+        if (!bytes || Number(file.size || 0) > 12 * 1024 * 1024) return null;
         const pdfjs = await loadPdfJs();
         const assetBase = ['https:', '', 'cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284'].join('/');
         const pdf = await pdfjs.getDocument({
-          data:bytes.slice(),
+          data:bytes,
           cMapUrl:assetBase + '/cmaps/',
           cMapPacked:true,
           standardFontDataUrl:assetBase + '/standard_fonts/',
@@ -3419,25 +3990,38 @@
     });
   }
 
-  async function runCloudUploadJob(job) {
+  async function runCloudUploadJob(job, options = {}) {
     if (!job.cloudSession) {
-      const bytes = new Uint8Array(await job.file.arrayBuffer());
-      const sha256 = await sha256Hex(bytes);
+      job.progress = 1;
+      renderUploadQueue();
+      const sha256 = await sha256FileInWorker(job.file);
       if (!sha256) throw new Error('Este navegador não conseguiu calcular o hash seguro do documento.');
       let thumbnail = null;
-      try { thumbnail = await createThumbnailFromLocalFile(job.file, bytes); }
+      try {
+        const previewBytes = job.file.type === 'application/pdf' && job.file.size <= 12 * 1024 * 1024
+          ? new Uint8Array(await job.file.arrayBuffer()) : null;
+        thumbnail = await createThumbnailFromLocalFile(job.file, previewBytes);
+        if (!thumbnail && job.file.type === 'application/pdf') job.thumbnailWarning = 'Miniatura será gerada na nuvem sem bloquear o envio.';
+      }
       catch (error) { job.thumbnailWarning = error.message || 'Miniatura pendente de processamento.'; }
+      const cloudRequestId = options.requestId || `${job.attemptRequestId || job.id}:cloud`;
       const reservation = await api('apiReservarUploadNuvem', state.token, {
         processId: job.processId,
+        documentId: options.documentId || '',
         typeId: job.typeId,
         fileName: job.fileName,
         mimeType: job.file.type,
         size: job.file.size,
         sha256,
         expectedVersion: job.expectedVersion,
-        requestId: job.id,
-        context: {...state.context, requestId:job.id}
+        requestId: cloudRequestId,
+        context: {...state.context, requestId:cloudRequestId}
       });
+      if (reservation.alreadyReady) {
+        job.documentId = reservation.documentId;
+        job.driveSyncPending = false;
+        return {...reservation, finalization:{driveSyncPending:false, driveReady:true, syncState:'SINCRONIZADO'}};
+      }
       const objectInputs = [{
         role:'original',
         mimeType:job.file.type,
@@ -3445,20 +4029,19 @@
         sha256
       }];
       if (thumbnail) {
-        const thumbnailBytes = new Uint8Array(await thumbnail.arrayBuffer());
         objectInputs.push({
           role:'thumbnail',
           mimeType:thumbnail.type,
           size:thumbnail.size,
-          sha256:await sha256Hex(thumbnailBytes)
+          sha256:await sha256FileInWorker(thumbnail)
         });
       }
       const session = await mediaApiRequest(reservation.apiBaseUrl, '/api/v1/media/uploads', {
         body:{ticket:reservation.ticket, objects:objectInputs}
       });
-      job.cloudSession = {reservation, session, sha256, thumbnail};
+      job.cloudSession = {reservation, session, sha256, thumbnail, requestId:cloudRequestId};
     }
-    const {reservation, session, sha256, thumbnail} = job.cloudSession;
+    const {reservation, session, sha256, thumbnail, requestId:cloudRequestId} = job.cloudSession;
     for (const target of session.objects) {
       const source = target.role === 'thumbnail' ? thumbnail : job.file;
       if (source) await uploadTusObject(source, target, job);
@@ -3467,14 +4050,21 @@
       body:{completionToken:session.completionToken},
       timeoutMs:120000
     });
+    let finalization;
     try {
-      await api('apiFinalizarUploadNuvem', state.token, completed.receipt, job.id);
+      finalization = await api('apiFinalizarUploadNuvem', state.token, completed.receipt, cloudRequestId);
     } catch (error) {
       if (error?.code !== 'DUPLICATE_REQUEST') throw error;
       const status = await api('apiConsultarEstadoMidia', state.token, reservation.documentId);
       if (status.status !== 'READY') throw error;
+      finalization = {
+        driveSyncPending:status.driveSupabaseSync !== 'SINCRONIZADO',
+        driveReady:status.driveSupabaseSync === 'SINCRONIZADO',
+        syncState:status.driveSupabaseSync
+      };
     }
     job.documentId = reservation.documentId;
+    job.driveSyncPending = Boolean(finalization?.driveSyncPending);
     if (thumbnail) {
       const identity = documentCacheIdentity(reservation.documentId, {
         hash:sha256,
@@ -3487,19 +4077,19 @@
         hash:sha256
       });
     }
-    return reservation;
+    return {...reservation, finalization};
   }
 
-  function createUploadJobForm(job) {
+  function createUploadJobForm(job, uploadRequestId) {
     const form = document.createElement('form');
     form.className = 'hidden background-upload-form';
-    form.dataset.apiKey = job.id;
+    form.dataset.apiKey = uploadRequestId;
     const fields = {
       token:state.token,
       processId:job.processId,
       typeId:job.typeId,
       expectedVersion:job.expectedVersion,
-      contextJson:JSON.stringify({...state.context, requestId:job.id})
+      contextJson:JSON.stringify({...state.context, requestId:uploadRequestId})
     };
     Object.entries(fields).forEach(([name,value]) => {
       const input = document.createElement('input');
@@ -3530,8 +4120,32 @@
     const active = jobs.filter(job => ['queued','uploading'].includes(job.status)).length;
     const failed = jobs.filter(job => job.status === 'failed').length;
     const complete = jobs.filter(job => job.status === 'complete').length;
-    $('#upload-queue-summary').textContent = active ? `${active} em andamento · ${complete} concluído(s)` : failed ? `${failed} com falha · ${complete} concluído(s)` : `${complete} concluído(s)`;
-    $('#upload-queue-items').innerHTML = jobs.map(job => `<article class="upload-queue-item status-${esc(job.status)}"><span class="upload-job-light"></span><div><strong title="${esc(job.fileName)}">${esc(job.fileName)}</strong><small>${esc(job.documentName)} · ${esc(fileSizeText(job.size))}</small><p>${job.status==='queued'?'Na fila segura':job.status==='uploading'?`Enviando sem bloquear a tela… ${esc(job.progress || 0)}%`:job.status==='complete'?'Enviado com sucesso':esc(job.error || 'Falha no envio')}</p></div>${job.status==='uploading'?'<span class="mini-spinner"></span>':job.status==='complete'?'<b>✓</b>':job.status==='failed'?`<button type="button" class="link-btn" data-retry-upload-job="${esc(job.id)}">Tentar novamente</button>`:''}</article>`).join('');
+    const warnings = jobs.filter(job => job.status === 'complete' && job.warning).length;
+    $('#upload-queue-summary').textContent = active
+      ? `${active} em andamento · ${complete} concluído(s)`
+      : failed
+        ? `${failed} com falha · ${complete} concluído(s)`
+        : warnings
+          ? `${complete} concluído(s) · ${warnings} cópia(s) rápida(s) pendente(s)`
+          : `${complete} concluído(s)`;
+    $('#upload-queue-items').innerHTML = jobs.map(job => {
+      const message = job.status === 'queued'
+        ? 'Na fila segura'
+        : job.status === 'uploading'
+          ? `Enviando sem bloquear a tela… ${esc(job.progress || 0)}%`
+          : job.status === 'complete'
+            ? esc(job.warning || job.syncMessage || 'Enviado com sucesso')
+            : esc(job.error || 'Falha no envio');
+      const extraClass = job.status === 'complete' && job.warning ? ' has-warning' : '';
+      const trailing = job.status === 'uploading'
+        ? '<span class="mini-spinner"></span>'
+        : job.status === 'complete'
+          ? `<b title="${job.warning ? 'Salvo no Drive; sincronização rápida pendente' : 'Envio concluído'}">${job.warning ? '!' : '✓'}</b>`
+          : job.status === 'failed'
+            ? `<button type="button" class="link-btn" data-retry-upload-job="${esc(job.id)}">Tentar novamente</button>`
+            : '';
+      return `<article class="upload-queue-item status-${esc(job.status)}${extraClass}"><span class="upload-job-light"></span><div><strong title="${esc(job.fileName)}">${esc(job.fileName)}</strong><small>${esc(job.documentName)} · ${esc(fileSizeText(job.size))}</small><p>${message}</p></div>${trailing}</article>`;
+    }).join('');
   }
 
   function enqueueDocumentUploads(typeId, items, documentName) {
@@ -3563,16 +4177,48 @@
   async function runUploadJob(job) {
     job.status = 'uploading';
     job.error = '';
+    job.warning = '';
+    job.syncMessage = '';
+    job.attempt = Number(job.attempt || 0) + 1;
+    job.attemptRequestId = `${job.id}:a${job.attempt}:${requestId()}`;
     renderUploadQueue();
     let form;
     try {
       let result;
-      if (mediaCloudEnabled()) {
-        result = await runCloudUploadJob(job);
-      } else {
-        form = createUploadJobForm(job);
+      const directDriveLimit = 6 * 1024 * 1024;
+      if (job.size <= directDriveLimit) {
+        const driveRequestId = `${job.attemptRequestId}:drive`;
+        form = createUploadJobForm(job, driveRequestId);
         result = await api('apiUploadDocumentoForm', form);
+        form.remove();
+        form = null;
         job.documentId = result.id;
+        job.syncMessage = 'Salvo com segurança no Google Drive.';
+
+        if (mediaCloudEnabled()) {
+          try {
+            job.cloudSession = null;
+            const cloudResult = await runCloudUploadJob(job, {
+              documentId:result.id,
+              requestId:`${job.attemptRequestId}:replica`
+            });
+            job.driveSyncPending = Boolean(cloudResult?.finalization?.driveSyncPending);
+            job.syncMessage = job.driveSyncPending
+              ? 'Salvo no Drive. A cópia rápida na nuvem está em processamento.'
+              : 'Salvo no Google Drive e sincronizado com a nuvem rápida.';
+          } catch (cloudError) {
+            job.driveSyncPending = false;
+            job.warning = 'Salvo com segurança no Google Drive. A cópia rápida no Supabase ficou pendente e não afeta o documento.';
+            job.cloudError = cloudError?.code || cloudError?.message || 'MEDIA_REPLICA_PENDING';
+          }
+        }
+      } else if (mediaCloudEnabled()) {
+        result = await runCloudUploadJob(job, {requestId:`${job.attemptRequestId}:cloud`});
+        job.syncMessage = result?.finalization?.driveSyncPending
+          ? 'Nuvem concluída. A cópia de segurança no Google Drive está em processamento.'
+          : 'Documento sincronizado na nuvem e no Google Drive.';
+      } else {
+        throw new Error('Arquivos acima de 6 MB exigem a nuvem documental ativa. O arquivo não foi alterado.');
       }
       job.status = 'complete';
       job.progress = 100;
@@ -3617,6 +4263,8 @@
     if (!job || job.status !== 'failed' || !job.file) return;
     job.status = 'queued';
     job.error = '';
+    job.warning = '';
+    job.attemptRequestId = '';
     state.uploadQueue.push(id);
     renderUploadQueue();
     processUploadQueue();
@@ -3761,29 +4409,48 @@
     } finally { setBusy(button, false); }
   }
 
-  async function loadAdmin() {
-    $('#users-table').innerHTML = '<div class="empty-state">Carregando administração...</div>';
-    try {
-      state.admin = await api('apiAdminBootstrap', state.token);
+  function activeAdminTab() {
+    return $('.subtab.active')?.dataset.adminTab || state.admin?.availableTabs?.[0] || 'users';
+  }
+
+  async function loadAdmin(tab = '', force = false) {
+    const targetTab = tab || activeAdminTab();
+    const loadedAt = Number(state.adminLoadedAt.get(targetTab) || 0);
+    if (!force && state.admin && Date.now() - loadedAt < 60000) {
       renderAdminNavigation();
-      renderAdminUsers(); renderAdminDocuments(); renderAdminFields(); renderAdminModels(); renderAdminSettings();
-    } catch(error) { $('#users-table').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`; }
+      renderAdminSection(targetTab);
+      return;
+    }
+    const contentIds={users:'users-table',documents:'documents-table',fields:'fields-table',models:'contract-models-table',settings:'settings-table',security:'security-health'};
+    const target = $(`#${contentIds[targetTab] || ''}`);
+    if (target) target.innerHTML = `<div class="empty-state">Carregando ${esc(targetTab)}...</div>`;
+    try {
+      const result = await api('apiAdminBootstrap', state.token, targetTab);
+      state.admin = Object.assign(state.admin || {}, result);
+      state.adminLoadedAt.set(targetTab, Date.now());
+      renderAdminNavigation();
+      renderAdminSection(targetTab);
+    } catch(error) { if(target)target.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`; }
   }
 
   function renderAdminNavigation() {
-    const available = {
-      users: Boolean(state.admin?.users),
-      documents: Boolean(state.admin?.documents),
-      fields: Array.isArray(state.admin?.forms),
-      models: Array.isArray(state.admin?.contractModels),
-      settings: Boolean(state.admin?.configs)
-    };
+    const allowed = new Set(state.admin?.availableTabs || []);
+    const available = Object.fromEntries(['users','documents','fields','models','settings','security'].map(tab=>[tab,allowed.has(tab)]));
     $$('.subtab').forEach(button => button.classList.toggle('hidden', !available[button.dataset.adminTab]));
     $$('.admin-tab').forEach(tab => tab.classList.toggle('hidden', !available[tab.id.replace('admin-', '')]));
     const active = $$('.subtab').find(button => button.classList.contains('active') && available[button.dataset.adminTab])
       || $$('.subtab').find(button => available[button.dataset.adminTab]);
     $$('.subtab').forEach(button => button.classList.toggle('active', button === active));
     $$('.admin-tab').forEach(tab => tab.classList.toggle('active', Boolean(active) && tab.id === `admin-${active.dataset.adminTab}`));
+  }
+
+  function renderAdminSection(tab) {
+    if(tab==='users')return renderAdminUsers();
+    if(tab==='documents')return renderAdminDocuments();
+    if(tab==='fields')return renderAdminFields();
+    if(tab==='models')return renderAdminModels();
+    if(tab==='settings')return renderAdminSettings();
+    if(tab==='security')return renderAdminSecurity();
   }
 
   function renderAdminUsers() {
@@ -3838,6 +4505,51 @@
     }, {});
     $('#settings-table').innerHTML = `<div class="settings-intro"><div><strong>Configurações do sistema</strong><p>Edite cada campo diretamente. Valores secretos nunca são enviados ao navegador.</p></div><span>${configs.length} itens verificados</span></div><div class="settings-groups">${Object.entries(groups).map(([group, items]) => `<section class="settings-group"><header><h4>${esc(statusText(group))}</h4><span>${items.length} configuração(ões)</span></header><div class="settings-grid">${items.map(renderConfigCard).join('')}</div></section>`).join('')}</div>`;
     $$('[data-config-form]', $('#settings-table')).forEach(form => form.addEventListener('submit', submitConfig));
+  }
+
+  function renderAdminSecurity() {
+    const health=state.admin?.security;
+    if(!health)return;
+    const card=(label,value,detail,status='ok')=>`<article class="health-card ${esc(status)}"><small>${esc(label)}</small><strong>${esc(value)}</strong><span>${esc(detail)}</span></article>`;
+    const remote=health.media.remote||{};
+    $('#security-health').innerHTML=`<div class="health-grid">
+      ${card('Versão',health.versionConsistent?health.appVersion:'Inconsistente',`Instalada: ${health.installedVersion||'não informada'}`,health.versionConsistent?'ok':'danger')}
+      ${card('Desenvolvedor',health.developerFullAccess?'Acesso pleno':'Inconsistente','Administra todas as funções; não pode apagar auditoria ou alterar processo finalizado.',health.developerFullAccess?'ok':'danger')}
+      ${card('Auditoria',health.audit.valid&&health.audit.linear?'Íntegra':`${health.audit.failures} falha(s)`,`${health.audit.records} registros · sequência ${health.audit.lastSequence}`,health.audit.valid&&health.audit.linear?'ok':'danger')}
+      ${card('Nuvem documental',health.media.enabled?'Ativa':'Desativada',`${health.media.provider} · ${health.media.megabytes} MB · ${health.media.ready}/${health.media.documents} prontos`,health.media.enabled&&health.media.apiUrlConfigured&&health.media.signingSecretConfigured?'ok':'warning')}
+      ${card('Chave de assinatura',health.media.signingSecretConfigured?'Configurada':'Ausente','Segredo nunca é enviado ao navegador.',health.media.signingSecretConfigured?'ok':'warning')}
+      ${card('Âncora externa',health.audit.externalAnchorEnabled?'Ativa':'Desativada','Protege a raiz da cadeia contra adulteração silenciosa.',health.audit.externalAnchorEnabled?'ok':'warning')}
+      ${card('API remota',remote.checked?(remote.healthy?'Saudável':'Falha'):'Não testada',remote.message||'Execute o teste controlado.',remote.checked?(remote.healthy?'ok':'danger'):'warning')}
+      ${card('Usuários',`${health.users.active} ativos`,`${health.users.total} cadastrados`,'ok')}
+    </div><div class="health-actions"><button type="button" class="btn secondary compact" data-test-cloud-health>Testar API documental</button><button type="button" class="btn secondary compact" data-verify-audit-health>Verificar cadeia</button>${health.audit.externalAnchorEnabled?'<button type="button" class="btn primary compact" data-anchor-audit>Fixar raiz na nuvem</button>':''}</div>
+      <form id="media-signing-secret-form" class="secret-config-form" autocomplete="off">
+        <div><strong>Chave privada da nuvem documental</strong><p>${health.media.signingSecretConfigured?'A chave está configurada. Use este campo somente para uma rotação controlada.':'Configure a mesma chave privada utilizada pela API Supabase.'} O valor nunca será devolvido ao navegador.</p></div>
+        <label><span>Nova chave de assinatura</span><input name="secret" type="password" minlength="64" maxlength="256" pattern="[A-Za-z0-9_-]+" autocomplete="new-password" required></label>
+        <button class="btn primary compact">${health.media.signingSecretConfigured?'Rotacionar chave':'Salvar chave privada'}</button>
+      </form>`;
+    $('#media-signing-secret-form').addEventListener('submit',submitMediaSigningSecret);
+  }
+
+  async function submitMediaSigningSecret(event) {
+    event.preventDefault();
+    const form=event.currentTarget;
+    const button=form.querySelector('button[type="submit"],button:not([type])');
+    const secret=formControl(form,'secret').value.trim();
+    setBusy(button,true,'Salvando...');
+    try{
+      await api('apiAdminSalvarSegredoMidia',state.token,secret,{...state.context,requestId:requestId()});
+      form.reset();
+      toast('Chave privada configurada sem exposição no navegador.','success');
+      await loadAdmin('security',true);
+    }catch(error){toast(error.message,'error');}
+    finally{if(button.isConnected)setBusy(button,false);}
+  }
+
+  async function refreshAdminSecurityRemote(button) {
+    setBusy(button,true,'Testando...');
+    try{state.admin.security=await api('apiAdminSaudeSistema',state.token,true);state.adminLoadedAt.set('security',Date.now());renderAdminSecurity();toast('Diagnóstico remoto concluído.','success');}
+    catch(error){toast(error.message,'error');}
+    finally{if(button.isConnected)setBusy(button,false);}
   }
 
   function dateInputValue(value) {
@@ -3965,19 +4677,19 @@
 
   async function submitUser(event) {
     event.preventDefault();const button=$('button[type=submit]',event.currentTarget);setBusy(button,true);
-    try{const data=formObject(event.currentTarget);data.permissions=$$('#user-permissions input:checked').map(input=>input.value);const result=await api('apiSalvarUsuario',state.token,data,state.context);closeModal();toast('Usuário salvo.','success');if(result.temporaryPassword)alert(`Senha temporária: ${result.temporaryPassword}\n\nGuarde-a em local seguro e solicite a troca no primeiro acesso.`);await loadAdmin();}
+    try{const data=formObject(event.currentTarget);data.permissions=$$('#user-permissions input:checked').map(input=>input.value);const result=await api('apiSalvarUsuario',state.token,data,state.context);closeModal();toast('Usuário salvo.','success');if(result.temporaryPassword)alert(`Senha temporária: ${result.temporaryPassword}\n\nGuarde-a em local seguro e solicite a troca no primeiro acesso.`);await loadAdmin('users',true);}
     catch(error){toast(error.message,'error');}finally{setBusy(button,false);}
   }
 
   async function submitDoc(event) {
     event.preventDefault();const button=$('button[type=submit]',event.currentTarget);setBusy(button,true);
-    try{const form=event.currentTarget;const data=formObject(form);data.processTypes=$$('[data-doc-applies]:checked',form).map(input=>input.value);data.requiredProcessTypes=$$('[data-doc-required]:checked',form).map(input=>input.value);data.categories=$$('[data-doc-category]:checked',form).map(input=>input.value);data.active=formControl(form,'active').checked;await api('apiSalvarTipoDocumento',state.token,data,state.context);closeModal();toast('Regras do documento salvas.','success');state.bootstrap=await api('apiBootstrap',state.token);await loadAdmin();}
+    try{const form=event.currentTarget;const data=formObject(form);data.processTypes=$$('[data-doc-applies]:checked',form).map(input=>input.value);data.requiredProcessTypes=$$('[data-doc-required]:checked',form).map(input=>input.value);data.categories=$$('[data-doc-category]:checked',form).map(input=>input.value);data.active=formControl(form,'active').checked;await api('apiSalvarTipoDocumento',state.token,data,state.context);closeModal();toast('Regras do documento salvas.','success');state.bootstrap=await api('apiBootstrap',state.token);await loadAdmin('documents',true);}
     catch(error){toast(error.message,'error');}finally{setBusy(button,false);}
   }
 
   async function submitField(event) {
     event.preventDefault();const button=$('button[type=submit]',event.currentTarget);setBusy(button,true);
-    try{const form=event.currentTarget;const data=formObject(form);data.options=data.options?data.options.split(',').map(item=>item.trim()).filter(Boolean):[];data.required=formControl(form,'required').checked;data.active=formControl(form,'active').checked;await api('apiSalvarCampoFormulario',state.token,data,state.context);closeModal();toast('Campo salvo.','success');state.bootstrap=await api('apiBootstrap',state.token);await loadAdmin();}
+    try{const form=event.currentTarget;const data=formObject(form);data.options=data.options?data.options.split(',').map(item=>item.trim()).filter(Boolean):[];data.required=formControl(form,'required').checked;data.active=formControl(form,'active').checked;await api('apiSalvarCampoFormulario',state.token,data,state.context);closeModal();toast('Campo salvo.','success');state.bootstrap=await api('apiBootstrap',state.token);await loadAdmin('fields',true);}
     catch(error){toast(error.message,'error');}finally{setBusy(button,false);}
   }
 
@@ -4002,12 +4714,17 @@
       else{updateShortProcessDraftStatus('',false);scheduleShortProcessDraftSave();}
     });
     $('#dynamic-process-form').addEventListener('change',()=>{updateConditionalFields();updateIncomeAffordability();scheduleShortProcessDraftSave();});
-    $('#dynamic-process-form').addEventListener('input',event=>{if(event.target.dataset.mask)maskValue(event.target);scheduleShortProcessDraftSave();});
+    $('#dynamic-process-form').addEventListener('input',event=>{if(event.target.dataset.mask)maskValue(event.target);if(event.target.matches('[data-mask="cpf"]'))scheduleCustomerDatabaseLookup(event.target);if(event.target.name==='imovel_codigo')schedulePropertyDatabaseLookup(event.target);scheduleShortProcessDraftSave();});
     $('#income-acceptance-check').addEventListener('change',scheduleShortProcessDraftSave);
     $('#process-form').addEventListener('submit',submitProcess);
     $('#dashboard-filter-btn').addEventListener('click',()=>loadProcesses('dashboard'));$('#process-filter-btn').addEventListener('click',()=>loadProcesses('processes'));
     ['dashboard-search','process-search'].forEach(id=>$('#'+id).addEventListener('keydown',event=>{if(event.key==='Enter')loadProcesses(id==='dashboard-search'?'dashboard':'processes');}));
+    $('#refresh-database-btn').addEventListener('click',()=>loadDatabase(true));
+    $('#database-client-search-btn').addEventListener('click',()=>loadCustomerDatabase(1));
+    $('#database-property-search-btn').addEventListener('click',()=>loadPropertyDatabase(1));
+    ['database-client-search','database-property-search'].forEach(id=>$('#'+id).addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();id==='database-client-search'?loadCustomerDatabase(1):loadPropertyDatabase(1);}}));
     $$('.js-close-modal').forEach(btn=>btn.addEventListener('click',()=>closeModal()));
+    $('[data-cancel-process-form]')?.addEventListener('click',cancelProcessForm);
     $('#modal-backdrop').addEventListener('click',event=>{if(event.target===event.currentTarget)toast('Esta janela não fecha ao clicar fora. Use o botão × ou Cancelar para não perder seu trabalho.');});
     document.addEventListener('keydown',event=>{
       if(event.key==='Escape'){
@@ -4051,20 +4768,31 @@
         const input=formControl($('#participant-form'),'document');
         if(input){input.value='';input.setCustomValidity('');}
       }
+      if(event.target.matches('#customer-record-form [name=personType]')){
+        const input=formControl($('#customer-record-form'),'document');
+        if(input)maskMasterDocument(input);
+      }
     });
     document.addEventListener('input',event=>{
-      if(event.target.matches('[data-participant-document]'))maskParticipantDocument(event.target);
-      else if(event.target.matches('#participant-form [data-mask],#proposal-form [data-mask]'))maskValue(event.target);
+      if(event.target.matches('[data-participant-document]')){maskParticipantDocument(event.target);scheduleParticipantDatabaseLookup(event.target);}
+      else if(event.target.matches('[data-master-document]'))maskMasterDocument(event.target);
+      else if(event.target.matches('#participant-form [data-mask],#proposal-form [data-mask],#customer-record-form [data-mask],#property-record-form [data-mask]'))maskValue(event.target);
     });
     document.addEventListener('dragover',event=>{const zone=event.target.closest?.('[data-document-dropzone]');if(zone){event.preventDefault();event.dataTransfer.dropEffect='copy';zone.classList.add('drag-active');}});
     document.addEventListener('dragleave',event=>{const zone=event.target.closest?.('[data-document-dropzone]');if(zone&&!zone.contains(event.relatedTarget))zone.classList.remove('drag-active');});
     document.addEventListener('drop',event=>{const zone=event.target.closest?.('[data-document-dropzone]');if(zone){event.preventDefault();zone.classList.remove('drag-active');const files=Array.from(event.dataTransfer?.files||[]);selectDocumentFiles(zone.closest('[data-document-upload]'),files,true);}});
     document.addEventListener('dblclick',event=>{const row=event.target.closest?.('[data-process-id]');if(row&&!event.target.closest('button')){event.preventDefault();openProcess(row.dataset.processId,'visual');}});
-    $('#refresh-admin-btn').addEventListener('click',loadAdmin);$$('.subtab').forEach(btn=>btn.addEventListener('click',()=>{$$('.subtab').forEach(b=>b.classList.toggle('active',b===btn));$$('.admin-tab').forEach(tab=>tab.classList.toggle('active',tab.id===`admin-${btn.dataset.adminTab}`));}));
+    $('#refresh-admin-btn').addEventListener('click',()=>loadAdmin(activeAdminTab(),true));$$('.subtab').forEach(btn=>btn.addEventListener('click',()=>{$$('.subtab').forEach(b=>b.classList.toggle('active',b===btn));$$('.admin-tab').forEach(tab=>tab.classList.toggle('active',tab.id===`admin-${btn.dataset.adminTab}`));loadAdmin(btn.dataset.adminTab);}));
     $('#refresh-contracts-btn').addEventListener('click',loadContracts);
     $('#add-user-btn').addEventListener('click',()=>openUserModal());$('#add-doc-btn').addEventListener('click',()=>openDocModal());$('#add-field-btn').addEventListener('click',()=>openFieldModal());$('#field-type-filter').addEventListener('change',renderAdminFields);
-    $('#user-form').addEventListener('submit',submitUser);$('#doc-form').addEventListener('submit',submitDoc);$('#field-form').addEventListener('submit',submitField);$('#password-form').addEventListener('submit',submitPassword);$('#forward-form').addEventListener('submit',submitForward);$('#participant-form').addEventListener('submit',submitParticipant);$('#proposal-form').addEventListener('submit',submitProposal);$('#proposal-accept-form').addEventListener('submit',submitProposalAcceptance);$('#workflow-form').addEventListener('submit',submitWorkflow);
+    $('#user-form').addEventListener('submit',submitUser);$('#doc-form').addEventListener('submit',submitDoc);$('#field-form').addEventListener('submit',submitField);$('#contract-model-form').addEventListener('submit',submitContractModel);$('#password-form').addEventListener('submit',submitPassword);$('#forward-form').addEventListener('submit',submitForward);$('#participant-form').addEventListener('submit',submitParticipant);$('#proposal-form').addEventListener('submit',submitProposal);$('#proposal-accept-form').addEventListener('submit',submitProposalAcceptance);$('#workflow-form').addEventListener('submit',submitWorkflow);$('#customer-record-form').addEventListener('submit',submitCustomerRecord);$('#property-record-form').addEventListener('submit',submitPropertyRecord);
     document.addEventListener('click',async event=>{
+      const databaseTab=event.target.closest('[data-database-tab]');if(databaseTab){setDatabaseTab(databaseTab.dataset.databaseTab);return loadDatabase();}
+      const databasePage=event.target.closest('[data-database-page]');if(databasePage){const page=Number(databasePage.dataset.databasePage||1);return databasePage.dataset.databasePageKind==='properties'?loadPropertyDatabase(page):loadCustomerDatabase(page);}
+      const customerRecord=event.target.closest('[data-customer-record]');if(customerRecord)return openCustomerRecord(customerRecord.dataset.customerRecord);
+      const propertyRecord=event.target.closest('[data-property-record]');if(propertyRecord)return openPropertyRecord(propertyRecord.dataset.propertyRecord);
+      if(event.target.closest('[data-decline-database-match]'))return closeDatabaseMatch();
+      if(event.target.closest('[data-apply-database-match]'))return applyDatabaseMatch();
       const openFlow=event.target.closest('[data-open-process-flow]');if(openFlow)return openProcess(openFlow.dataset.openProcessFlow,'flow');
       const open=event.target.closest('[data-open-process]');if(open)return openProcess(open.dataset.openProcess);
       const openContractProcess=event.target.closest('[data-open-contract-process]');if(openContractProcess)return openProcess(openContractProcess.dataset.openContractProcess,'details');
@@ -4090,6 +4818,7 @@
       const previewDownload=event.target.closest('[data-preview-download]');if(previewDownload&&state.previewDocumentId)return downloadDocument(state.previewDocumentId,previewDownload);
       const deleteDocument=event.target.closest('[data-delete-doc]');if(deleteDocument)return removeStoredDocument(deleteDocument.dataset.deleteDoc,deleteDocument);
       if(event.target.closest('[data-download-registration-sheet]')){if(!state.processLoadedTabs.has('registration'))await ensureProcessTab('registration');return downloadRegistrationSheet();}
+      if(event.target.closest('[data-edit-process]'))return openEditProcess();
       const retryUpload=event.target.closest('[data-retry-upload-job]');if(retryUpload)return retryUploadJob(retryUpload.dataset.retryUploadJob);
       if(event.target.closest('[data-clear-upload-history]'))return clearCompletedUploadJobs();
       if(event.target.closest('[data-toggle-upload-queue]')){$('#upload-queue-widget').classList.toggle('collapsed');return;}
@@ -4125,11 +4854,16 @@
       if(event.target.closest('[data-add-pending]')){try{await api('apiCriarPendencia',state.token,state.currentProcess.process.id,{title:$('#pending-title').value,description:$('#pending-description').value,dueDate:$('#pending-date').value,expectedVersion:state.currentProcess.process.version},state.context);toast('Pendência criada.','success');await refreshDetail(['review']);}catch(error){toast(error.message,'error');}return;}
       const complete=event.target.closest('[data-complete-pending]');if(complete){if(!confirm('Confirma que analisou a correção e que esta pendência foi resolvida com sucesso?'))return;try{await api('apiConcluirPendencia',state.token,complete.dataset.completePending,{...state.context,expectedVersion:state.currentProcess.process.version});toast('OK da pendência registrado com aceite eletrônico.','success');await refreshDetail(['review']);}catch(error){toast(error.message,'error');}return;}
       const editUser=event.target.closest('[data-edit-user]');if(editUser)return openUserModal(editUser.dataset.editUser);
-      const userAction=event.target.closest('[data-user-action]');if(userAction&&confirm(`Confirma a ação ${userAction.dataset.userAction.toLowerCase()}?`)){try{await api('apiAcaoUsuario',state.token,userAction.dataset.userId,userAction.dataset.userAction,state.context);toast('Usuário atualizado.','success');await loadAdmin();}catch(error){toast(error.message,'error');}return;}
+      const userAction=event.target.closest('[data-user-action]');if(userAction&&confirm(`Confirma a ação ${userAction.dataset.userAction.toLowerCase()}?`)){try{await api('apiAcaoUsuario',state.token,userAction.dataset.userId,userAction.dataset.userAction,state.context);toast('Usuário atualizado.','success');await loadAdmin('users',true);}catch(error){toast(error.message,'error');}return;}
       const setPassword=event.target.closest('[data-set-password]');if(setPassword){const password=prompt('Nova senha temporária (mínimo 10 caracteres):');if(password){try{await api('apiDefinirSenhaUsuario',state.token,setPassword.dataset.setPassword,password,state.context);toast('Senha definida.','success');}catch(error){toast(error.message,'error');}}return;}
       const editDoc=event.target.closest('[data-edit-doc]');if(editDoc)return openDocModal(editDoc.dataset.editDoc);
       const editField=event.target.closest('[data-edit-field]');if(editField)return openFieldModal(editField.dataset.editField);
       const editModel=event.target.closest('[data-edit-contract-model]');if(editModel)return editContractModel(editModel.dataset.editContractModel);
+      if(event.target.closest('[data-add-contract-clause]'))return addContractClause();
+      const removeClause=event.target.closest('[data-remove-contract-clause]');if(removeClause){const rows=$$('[data-contract-clause-row]');if(rows.length<=1)return toast('O modelo deve possuir ao menos uma cláusula.','error');removeClause.closest('[data-contract-clause-row]')?.remove();return;}
+      const cloudHealth=event.target.closest('[data-test-cloud-health]');if(cloudHealth)return refreshAdminSecurityRemote(cloudHealth);
+      const auditHealth=event.target.closest('[data-verify-audit-health]');if(auditHealth){setBusy(auditHealth,true,'Verificando...');try{const result=await api('apiVerificarIntegridadeAuditoria',state.token);toast(result.valid?'Cadeia de auditoria íntegra.':'Falha na cadeia de auditoria.',result.valid?'success':'error');await loadAdmin('security',true);}catch(error){toast(error.message,'error');}finally{if(auditHealth.isConnected)setBusy(auditHealth,false);}return;}
+      const anchorAudit=event.target.closest('[data-anchor-audit]');if(anchorAudit){setBusy(anchorAudit,true,'Ancorando...');try{await api('apiAncorarAuditoria',state.token,requestId());toast('Raiz da auditoria fixada na nuvem.','success');await loadAdmin('security',true);}catch(error){toast(error.message,'error');}finally{if(anchorAudit.isConnected)setBusy(anchorAudit,false);}return;}
     });
     window.addEventListener('beforeunload',event=>{
       if(!state.processDraftDirty&&state.uploadWorkers===0)return;

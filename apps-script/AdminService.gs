@@ -283,6 +283,7 @@ function apiSalvarTipoDocumento(token, payload, context) {
     autAssert_(requiredProcessTypes.every(function(type) { return processTypes.indexOf(type) >= 0; }), 'Um documento só pode ser obrigatório quando estiver disponível para o tipo de processo.');
     autAssert_(categories.every(function(category) { return AUTENTIKO.REVIEW_CATEGORIES.indexOf(category) >= 0; }), 'Há uma categoria gerencial inválida.');
     autAssert_(mimeTypes.length <= 500, 'A lista de formatos permitidos é muito extensa.', 'FIELD_TOO_LARGE');
+    var catalogMaximumMb = mimeTypes.toLowerCase().indexOf('application/pdf') >= 0 ? 100 : 25;
     var row = {
       ID_DOCUMENTO_TIPO: id, NOME_DOCUMENTO: documentName,
       TIPOS_PROCESSO_JSON: JSON.stringify(processTypes),
@@ -290,7 +291,7 @@ function apiSalvarTipoDocumento(token, payload, context) {
       CATEGORIAS_JSON: JSON.stringify(categories),
       OBRIGATORIO: requiredProcessTypes.length ? 'SIM' : 'NAO', ATIVO: payload.active === false ? 'NAO' : 'SIM',
       ORDEM: Number(payload.order || 999), MIME_ACEITOS: mimeTypes,
-      TAMANHO_MAX_MB: Math.min(Math.max(Number(payload.maxMb || AUTENTIKO.MAX_UPLOAD_MB), 1), AUTENTIKO.MAX_UPLOAD_MB),
+      TAMANHO_MAX_MB: Math.min(Math.max(Number(payload.maxMb || AUTENTIKO.MAX_UPLOAD_MB), 1), catalogMaximumMb),
       CRIADO_EM: autNow_()
     };
     autUpsert_('DOCUMENTOS_CATALOGO', 'ID_DOCUMENTO_TIPO', row);
@@ -338,28 +339,137 @@ function apiSalvarCampoFormulario(token, payload, context) {
   } catch (err) { return autPublicError_(err); }
 }
 
-function apiAdminBootstrap(token) {
+function autAdminHealthData_(actor, includeRemote) {
+  autAssert_(autHasPermission_(actor, 'CONFIGURACAO_GERIR') || actor.PERFIL === 'DESENVOLVEDOR',
+    'Você não possui acesso ao diagnóstico administrativo.', 'FORBIDDEN');
+  var configs = autConfigMap_();
+  var audit = autVerifyAuditRows_();
+  var auditRows = autRows_('AUDITORIA').sort(function(a, b) { return Number(a.SEQUENCIA || 0) - Number(b.SEQUENCIA || 0); });
+  var lastAudit = auditRows.length ? auditRows[auditRows.length - 1] : {};
+  var documents = autRows_('PROCESSO_DOCUMENTOS').filter(function(row) { return !row.EXCLUIDO_EM; });
+  var totalBytes = documents.reduce(function(total, row) { return total + Number(row.TAMANHO_BYTES || 0); }, 0);
+  var mediaReady = documents.filter(function(row) { return row.MEDIA_STATUS === 'READY'; }).length;
+  var mediaPending = documents.filter(function(row) {
+    return row.MEDIA_STATUS && row.MEDIA_STATUS !== 'READY' && row.MEDIA_STATUS !== 'DRIVE_ONLY';
+  }).length;
+  var scriptProperties = PropertiesService.getScriptProperties();
+  var baseUrl = String(configs.MEDIA_API_BASE_URL || '').replace(/\/+$/, '');
+  var cloudEnabled = mediaCloudEnabled_();
+  var remote = { checked: false, healthy: false, status: 0, latencyMs: 0, message: 'Teste remoto não solicitado.' };
+  if (includeRemote && baseUrl) {
+    var started = Date.now();
+    remote.checked = true;
+    try {
+      var response = UrlFetchApp.fetch(baseUrl + '/api/health', {
+        method: 'get', muteHttpExceptions: true, followRedirects: false,
+        headers: { 'Cache-Control': 'no-cache', 'X-Autentiko-Health': '1' }
+      });
+      remote.status = response.getResponseCode();
+      remote.healthy = remote.status >= 200 && remote.status < 300;
+      remote.message = remote.healthy ? 'API documental respondeu corretamente.' : 'API respondeu com HTTP ' + remote.status + '.';
+    } catch (err) {
+      remote.message = 'API documental indisponível: ' + String(err && err.message || err).slice(0, 180);
+    }
+    remote.latencyMs = Date.now() - started;
+  }
+  var installed = autFind_('CONFIGURACOES', 'CHAVE', 'VERSAO_SISTEMA');
+  return {
+    checkedAt: autNow_(), appVersion: AUTENTIKO.APP_VERSION,
+    installedVersion: installed ? String(installed.VALOR || '') : '',
+    versionConsistent: !!installed && String(installed.VALOR || '') === AUTENTIKO.APP_VERSION,
+    developerFullAccess: actor.PERFIL === 'DESENVOLVEDOR' && autHasPermission_(actor, 'CONFIGURACAO_GERIR') && autHasPermission_(actor, 'AUDITORIA_VER'),
+    immutableRules: {
+      finalizedProcess: true, auditApplicationAppendOnly: true,
+      developerMayAdministrate: actor.PERFIL === 'DESENVOLVEDOR',
+      developerMayEraseAudit: false
+    },
+    audit: {
+      valid: audit.valid, linear: audit.linear, records: audit.records,
+      failures: audit.failures.length, lastSequence: Number(lastAudit.SEQUENCIA || 0),
+      rootHash: String(lastAudit.HASH_ATUAL || ''),
+      externalAnchorEnabled: autNormalize_(configs.AUDIT_ANCHOR_ENABLED) === 'SIM'
+    },
+    media: {
+      enabled: cloudEnabled, provider: String(configs.MEDIA_PROVIDER || 'SUPABASE_EDGE'),
+      apiUrlConfigured: !!baseUrl,
+      signingSecretConfigured: String(scriptProperties.getProperty('AUT_MEDIA_SIGNING_SECRET') || '').length >= 32,
+      documents: documents.length, ready: mediaReady, pending: mediaPending,
+      bytes: totalBytes, megabytes: Math.round(totalBytes / 1048576 * 100) / 100,
+      remote: remote
+    },
+    users: {
+      total: autRows_('USUARIOS').filter(function(row) { return row.STATUS !== 'EXCLUIDO'; }).length,
+      active: autRows_('USUARIOS').filter(function(row) { return row.STATUS === 'ATIVO'; }).length
+    }
+  };
+}
+
+function apiAdminSaudeSistema(token, includeRemote) {
+  try {
+    var actor = autRequireAuth_(token);
+    return autResult_(autAdminHealthData_(actor, includeRemote === true));
+  } catch (err) { return autPublicError_(err); }
+}
+
+function apiAdminSalvarSegredoMidia(token, signingSecret, context) {
+  try {
+    var actor = autRequireAuth_(token);
+    autAssert_(autHasPermission_(actor, 'CONFIGURACAO_GERIR') || actor.PERFIL === 'DESENVOLVEDOR',
+      'Você não possui permissão para configurar a nuvem documental.', 'FORBIDDEN');
+    var secret = String(signingSecret || '').trim();
+    autAssert_(secret.length >= 64 && secret.length <= 256,
+      'A chave de assinatura deve possuir entre 64 e 256 caracteres.', 'INVALID_MEDIA_SIGNING_SECRET');
+    autAssert_(/^[A-Za-z0-9_-]+$/.test(secret),
+      'A chave de assinatura contém caracteres inválidos.', 'INVALID_MEDIA_SIGNING_SECRET');
+    PropertiesService.getScriptProperties().setProperty('AUT_MEDIA_SIGNING_SECRET', secret);
+    autAudit_(actor, 'SEGREDO_MIDIA_ATUALIZADO', 'CONFIGURACAO', 'AUT_MEDIA_SIGNING_SECRET', {
+      configured: true,
+      length: secret.length,
+      valueExposed: false
+    }, context || {});
+    return autResult_({ configured: true });
+  } catch (err) { return autPublicError_(err); }
+}
+
+function apiAdminBootstrap(token, section) {
   try {
     var actor = autRequireAuth_(token);
     var data = {};
-    if (autHasPermission_(actor, 'USUARIO_GERIR')) data.users = autUsersAdminData_(actor);
-    if (autHasPermission_(actor, 'FORMULARIO_GERIR')) {
-      data.documents = autDocumentsAdminData_();
-      data.forms = autRows_('FORMULARIOS').map(function(row) {
-        return { id: row.ID_CAMPO, processType: row.TIPO_PROCESSO, section: row.SECAO, name: row.CAMPO, label: row.ROTULO, input: row.TIPO_CAMPO, options: autJsonParse_(row.OPCOES_JSON, []), required: autNormalize_(row.OBRIGATORIO) === 'SIM', order: Number(row.ORDEM || 0), active: autNormalize_(row.ATIVO) !== 'NAO' };
-      });
+    var requested = autNormalize_(section || '');
+    var loadAll = !requested;
+    data.availableTabs = [];
+    if (autHasPermission_(actor, 'USUARIO_GERIR')) data.availableTabs.push('users');
+    if (autHasPermission_(actor, 'FORMULARIO_GERIR')) data.availableTabs = data.availableTabs.concat(['documents', 'fields']);
+    if (autHasPermission_(actor, 'CONTRATO_MODELO_GERIR')) data.availableTabs.push('models');
+    if (autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.availableTabs = data.availableTabs.concat(['settings', 'security']);
+    if ((loadAll || requested === 'USERS') && autHasPermission_(actor, 'USUARIO_GERIR')) data.users = autUsersAdminData_(actor);
+    if ((loadAll || requested === 'DOCUMENTS' || requested === 'FIELDS') && autHasPermission_(actor, 'FORMULARIO_GERIR')) {
+      if (loadAll || requested === 'DOCUMENTS') data.documents = autDocumentsAdminData_();
+      if (loadAll || requested === 'FIELDS') {
+        data.forms = autRows_('FORMULARIOS').map(function(row) {
+          return { id: row.ID_CAMPO, processType: row.TIPO_PROCESSO, section: row.SECAO, name: row.CAMPO, label: row.ROTULO, input: row.TIPO_CAMPO, options: autJsonParse_(row.OPCOES_JSON, []), required: autNormalize_(row.OBRIGATORIO) === 'SIM', order: Number(row.ORDEM || 0), active: autNormalize_(row.ATIVO) !== 'NAO' };
+        });
+      }
     }
-    if (autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.configs = autConfigsAdminData_(actor);
-    if (autHasPermission_(actor, 'CONTRATO_MODELO_GERIR')) {
+    if ((loadAll || requested === 'SETTINGS') && autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.configs = autConfigsAdminData_(actor);
+    if ((loadAll || requested === 'SECURITY') && autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.security = autAdminHealthData_(actor, false);
+    if ((loadAll || requested === 'MODELS') && autHasPermission_(actor, 'CONTRATO_MODELO_GERIR')) {
       data.contractModels = autRows_('MODELOS_CONTRATO').map(function(row) {
+        var modelVersion = Number(row.VERSAO || 1);
         return {
           id: row.ID_MODELO, proposalType: row.TIPO_PROPOSTA, name: row.NOME_MODELO,
-          title: row.TITULO_CONTRATO, version: Number(row.VERSAO || 1),
+          title: row.TITULO_CONTRATO, version: modelVersion,
           legalStatus: row.STATUS_JURIDICO, watermark: row.MARCA_DAGUA,
-          active: String(row.ATIVO) !== 'NAO'
+          active: String(row.ATIVO) !== 'NAO',
+          clauses: autRowsBy_('CLAUSULAS_CONTRATO', 'ID_MODELO', row.ID_MODELO).filter(function(clause) {
+            return String(clause.ATIVO) !== 'NAO' && Number(clause.VERSAO || 1) === modelVersion;
+          }).map(function(clause) {
+            return { id: clause.ID_CLAUSULA, order: Number(clause.ORDEM || 0), title: clause.TITULO, text: clause.TEXTO };
+          }).sort(function(a, b) { return a.order - b.order; })
         };
       });
     }
+    data.loadedSection = requested ? requested.toLowerCase() : 'all';
     data.workflowCatalog = {
       categories: AUTENTIKO.REVIEW_CATEGORIES.map(function(value) { return { value: value, label: autLabel_(value) }; }),
       participantRoles: AUTENTIKO.PARTICIPANT_ROLES.map(function(value) { return { value: value, label: autLabel_(value) }; }),

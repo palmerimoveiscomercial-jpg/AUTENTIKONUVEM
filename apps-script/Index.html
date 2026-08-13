@@ -99,6 +99,7 @@
       <nav>
         <button class="nav-btn active" data-view="dashboard"><span>⌂</span>Painel</button>
         <button class="nav-btn" data-view="processes"><span>▤</span>Processos</button>
+        <button class="nav-btn hidden" id="database-nav" data-view="database"><span>⌕</span>Carta de clientes</button>
         <button class="nav-btn" data-view="contracts"><span>§</span>Contratos</button>
         <button class="nav-btn hidden" id="admin-nav" data-view="admin"><span>⚙</span>Administração</button>
       </nav>
@@ -136,15 +137,35 @@
         </div>
       </section>
 
+      <section id="database-view" class="app-view">
+        <div class="section-card database-card">
+          <div class="section-head"><div><h3>Data Base — Carta de Clientes</h3><p>Cadastros mestres deduplicados, imóveis e origem auditável em processos.</p></div><button class="btn secondary compact" id="refresh-database-btn">Atualizar</button></div>
+          <div class="database-tabs"><button type="button" class="active" data-database-tab="clients">Carta de clientes</button><button type="button" data-database-tab="properties">Base de imóveis</button></div>
+          <div id="database-clients-panel" class="database-panel active">
+            <div class="database-toolbar"><div class="smart-search"><span>⌕</span><input id="database-client-search" placeholder="Pesquisar por nome, CPF/CNPJ, telefone, e-mail, papel ou ID"></div><button class="btn primary compact" id="database-client-search-btn">Pesquisar</button></div>
+            <div id="database-client-summary" class="database-summary"></div>
+            <div id="database-clients-table"><div class="empty-state">Abra esta aba para consultar a Carta de Clientes.</div></div>
+            <div id="database-clients-pagination" class="database-pagination"></div>
+          </div>
+          <div id="database-properties-panel" class="database-panel">
+            <div class="database-toolbar"><div class="smart-search"><span>⌕</span><input id="database-property-search" placeholder="Pesquisar por endereço, código, matrícula, IPTU, tipo ou ID"></div><button class="btn primary compact" id="database-property-search-btn">Pesquisar</button></div>
+            <div id="database-property-summary" class="database-summary"></div>
+            <div id="database-properties-table"><div class="empty-state">Abra esta aba para consultar os imóveis cadastrados.</div></div>
+            <div id="database-properties-pagination" class="database-pagination"></div>
+          </div>
+        </div>
+      </section>
+
       <section id="admin-view" class="app-view">
         <div class="section-card">
-          <div class="section-head"><div><h3>Administração</h3><p>Usuários, permissões, documentos, formulários e configurações.</p></div><button class="btn secondary compact" id="refresh-admin-btn">Atualizar</button></div>
-          <div class="subtabs"><button class="subtab active" data-admin-tab="users">Usuários</button><button class="subtab" data-admin-tab="documents">Documentos</button><button class="subtab" data-admin-tab="fields">Campos</button><button class="subtab" data-admin-tab="models">Modelos contratuais</button><button class="subtab" data-admin-tab="settings">Configurações</button></div>
+          <div class="section-head"><div><h3>Administração</h3><p>Usuários, permissões, documentos, formulários, segurança e integridade.</p></div><button class="btn secondary compact" id="refresh-admin-btn">Atualizar aba</button></div>
+          <div class="subtabs"><button class="subtab active" data-admin-tab="users">Usuários</button><button class="subtab" data-admin-tab="documents">Documentos</button><button class="subtab" data-admin-tab="fields">Campos</button><button class="subtab" data-admin-tab="models">Modelos contratuais</button><button class="subtab" data-admin-tab="settings">Configurações</button><button class="subtab" data-admin-tab="security">Segurança e nuvem</button></div>
           <div id="admin-users" class="admin-tab active"><div class="admin-toolbar"><button class="btn primary compact" id="add-user-btn">+ Usuário</button></div><div id="users-table"></div></div>
           <div id="admin-documents" class="admin-tab"><div class="admin-toolbar"><button class="btn primary compact" id="add-doc-btn">+ Tipo de documento</button></div><div id="documents-table"></div></div>
           <div id="admin-fields" class="admin-tab"><div class="admin-toolbar"><select id="field-type-filter"></select><button class="btn primary compact" id="add-field-btn">+ Campo</button></div><div id="fields-table"></div></div>
           <div id="admin-models" class="admin-tab"><div id="contract-models-table"></div></div>
           <div id="admin-settings" class="admin-tab"><div id="settings-table"></div></div>
+          <div id="admin-security" class="admin-tab"><div id="security-health"><div class="empty-state">Abra esta aba para verificar integridade, permissões e nuvem documental.</div></div></div>
         </div>
       </section>
     </section>
@@ -152,7 +173,7 @@
 
   <div id="modal-backdrop" class="modal-backdrop hidden" aria-hidden="true">
     <div id="process-modal" class="modal xl hidden" role="dialog" aria-modal="true">
-      <div class="modal-head"><div><p class="eyebrow">NOVO PROCESSO</p><h2>Criar processo</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <div class="modal-head"><div><p class="eyebrow" id="process-modal-eyebrow">NOVO PROCESSO</p><h2 id="process-modal-title">Criar processo</h2></div><button class="icon-btn js-close-modal">×</button></div>
       <form id="process-form">
         <div class="process-wizard-steps" aria-label="Etapas do cadastro">
           <span class="active"><i>1</i><strong>Ficha cadastral</strong><small>Dados do processo</small></span>
@@ -168,7 +189,7 @@
             <label class="income-acceptance-check"><input id="income-acceptance-check" type="checkbox"><span>Sim, estou ciente de que a renda do inquilino não comporta três vezes o valor da parcela do aluguel.</span></label>
           </div>
         </section>
-        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn primary">Próxima etapa: documentos →</button></div>
+        <div class="modal-actions"><button type="button" class="btn ghost" data-cancel-process-form>Cancelar e descartar</button><button type="submit" class="btn primary" id="process-submit-btn">Próxima etapa: documentos →</button></div>
       </form>
     </div>
 
@@ -223,7 +244,7 @@
 
     <div id="doc-modal" class="modal hidden" role="dialog" aria-modal="true">
       <div class="modal-head"><h2>Tipo de documento</h2><button class="icon-btn js-close-modal">×</button></div>
-      <form id="doc-form"><input type="hidden" name="id"><label>Nome do documento<input name="name" maxlength="200" required></label><div class="form-grid two"><label>Ordem<input name="order" type="number" value="999"></label><label>Limite (MB)<input name="maxMb" type="number" min="1" max="6" value="6"></label></div><label>Formatos MIME<input name="mimeTypes" maxlength="500" value="application/pdf,image/jpeg,image/png"></label><fieldset><legend>Categorias de conferência gerencial</legend><div id="doc-category-rules" class="check-grid"></div></fieldset><fieldset><legend>Regras por tipo de processo</legend><p class="doc-rules-help">Escolha onde o documento aparece e em quais processos ele é obrigatório.</p><div id="doc-process-rules" class="doc-rules-grid"></div></fieldset><div class="switches"><label class="check"><input name="active" type="checkbox" checked> Tipo de documento ativo</label></div><div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button class="btn primary">Salvar regras</button></div></form>
+      <form id="doc-form"><input type="hidden" name="id"><label>Nome do documento<input name="name" maxlength="200" required></label><div class="form-grid two"><label>Ordem<input name="order" type="number" value="999"></label><label>Limite por arquivo (MB)<input name="maxMb" type="number" min="1" max="100" value="6"><small>Na nuvem: imagens até 25 MB e PDFs até 100 MB. O original nunca é reduzido.</small></label></div><label>Formatos MIME<input name="mimeTypes" maxlength="500" value="application/pdf,image/jpeg,image/png"></label><fieldset><legend>Categorias de conferência gerencial</legend><div id="doc-category-rules" class="check-grid"></div></fieldset><fieldset><legend>Regras por tipo de processo</legend><p class="doc-rules-help">Escolha onde o documento aparece e em quais processos ele é obrigatório.</p><div id="doc-process-rules" class="doc-rules-grid"></div></fieldset><div class="switches"><label class="check"><input name="active" type="checkbox" checked> Tipo de documento ativo</label></div><div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button class="btn primary">Salvar regras</button></div></form>
     </div>
 
     <div id="participant-modal" class="modal xl hidden" role="dialog" aria-modal="true">
@@ -235,6 +256,34 @@
         <div class="form-grid two"><label>Nacionalidade<input name="nationality" maxlength="80"></label><label>Estado civil<input name="maritalStatus" maxlength="80"></label><label>Regime de bens<input name="propertyRegime" maxlength="120"></label><label>Profissão<input name="profession" maxlength="120"></label><label>Renda mensal<input name="income" data-mask="currency" inputmode="decimal"></label><label>Empresa/local de trabalho<input name="employer" maxlength="180"></label><label>Cargo/função<input name="job" maxlength="180"></label><label>E-mail<input name="email" type="email" maxlength="254"></label><label>Telefone<input name="phone" type="tel" maxlength="20" data-mask="phone"></label></div>
         <fieldset><legend>Endereço</legend><div class="form-grid three"><label>CEP<input name="zip" maxlength="9" data-mask="cep"></label><label class="span-2">Rua<input name="street" maxlength="180"></label><label>Número<input name="number" maxlength="30"></label><label>Bairro<input name="district" maxlength="120"></label><label>Complemento<input name="complement" maxlength="120"></label><label>Cidade<input name="city" maxlength="120"></label><label>UF<input name="state" maxlength="2"></label></div></fieldset>
         <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn primary">Salvar participante</button></div>
+      </form>
+    </div>
+
+    <div id="database-match-modal" class="modal md hidden" role="dialog" aria-modal="true" aria-labelledby="database-match-title">
+      <div class="modal-head"><div><p class="eyebrow">CADASTRO ENCONTRADO</p><h2 id="database-match-title">Usar dados da Carta de Clientes?</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <div class="database-match-body"><div class="database-match-icon">✓</div><div><p id="database-match-message"></p><div id="database-match-summary" class="database-match-summary"></div></div></div>
+      <label>Usar os dados para preencher qual parte?<select id="database-match-target"></select></label>
+      <label class="check"><input id="database-match-overwrite" type="checkbox"> Substituir também campos que já foram digitados</label>
+      <div class="modal-actions"><button type="button" class="btn ghost" data-decline-database-match>Não usar</button><button type="button" class="btn primary" data-apply-database-match>Sim, preencher os campos</button></div>
+    </div>
+
+    <div id="customer-record-modal" class="modal xl hidden" role="dialog" aria-modal="true" aria-labelledby="customer-record-title">
+      <div class="modal-head"><div><p class="eyebrow">CARTA DE CLIENTES</p><h2 id="customer-record-title">Cadastro mestre</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="customer-record-form"><input type="hidden" name="id"><input type="hidden" name="expectedVersion">
+        <div class="master-record-banner" id="customer-record-banner"></div>
+        <section id="customer-record-conflicts" class="master-conflicts hidden" aria-live="polite"></section>
+        <fieldset><legend>Identificação</legend><div class="form-grid three"><label>Tipo de pessoa<select name="personType"><option value="PF">Pessoa física</option><option value="PJ">Pessoa jurídica</option></select></label><label>CPF/CNPJ<input name="document" maxlength="18" required data-master-document></label><label>Nome ou razão social<input name="name" maxlength="200" required></label><label>Nome fantasia<input name="tradeName" maxlength="200"></label><label>RG/IE<input name="rgIe" maxlength="100"></label><label>Órgão expedidor<input name="issuer" maxlength="100"></label><label>Data de nascimento/abertura<input name="birthOpening" type="date"></label><label>Nacionalidade<input name="nationality" maxlength="100"></label><label>Representante legal<input name="legalRepresentative" maxlength="200"></label></div></fieldset>
+        <fieldset><legend>Qualificação, renda e emprego</legend><div class="form-grid three"><label>Estado civil<input name="maritalStatus" maxlength="100"></label><label>Regime de bens<input name="propertyRegime" maxlength="100"></label><label>Profissão<input name="profession" maxlength="150"></label><label>Renda mensal<input name="income" data-mask="currency" inputmode="numeric"></label><label>Origem da renda<input name="incomeOrigin" maxlength="150"></label><label>Empresa/local de trabalho<input name="employer" maxlength="200"></label><label>Cargo/função<input name="job" maxlength="200"></label></div></fieldset>
+        <fieldset><legend>Contato</legend><div class="form-grid three"><label>E-mail<input name="email" type="email" maxlength="254"></label><label>Telefone<input name="phone" data-mask="tel" inputmode="numeric"></label><label>Telefone de recado<input name="messagePhone" data-mask="tel" inputmode="numeric"></label><label>Nome do contato de recado<input name="messageContactName" maxlength="200"></label></div></fieldset>
+        <fieldset><legend>Endereço</legend><div class="form-grid three"><label>CEP<input name="zip" data-mask="cep" inputmode="numeric"></label><label>Rua<input name="street" maxlength="200"></label><label>Número<input name="number" maxlength="50"></label><label>Bairro<input name="district" maxlength="150"></label><label>Complemento<input name="complement" maxlength="150"></label><label>Cidade<input name="city" maxlength="150"></label><label>Estado<input name="state" maxlength="80"></label></div></fieldset>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Fechar</button><button type="submit" class="btn primary" id="customer-record-save">Salvar cadastro mestre</button></div>
+      </form>
+    </div>
+
+    <div id="property-record-modal" class="modal lg hidden" role="dialog" aria-modal="true" aria-labelledby="property-record-title">
+      <div class="modal-head"><div><p class="eyebrow">BASE DE IMÓVEIS</p><h2 id="property-record-title">Cadastro do imóvel</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="property-record-form"><input type="hidden" name="id"><input type="hidden" name="expectedVersion"><div id="property-record-content"></div>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Fechar</button><button type="submit" class="btn primary" id="property-record-save">Salvar cadastro do imóvel</button></div>
       </form>
     </div>
 
@@ -275,6 +324,17 @@
     <div id="field-modal" class="modal hidden" role="dialog" aria-modal="true">
       <div class="modal-head"><h2>Campo de formulário</h2><button class="icon-btn js-close-modal">×</button></div>
       <form id="field-form"><input type="hidden" name="id"><label>Tipo de processo<select name="processType" required></select></label><div class="form-grid two"><label>Seção<input name="section" maxlength="120" required></label><label>Ordem<input name="order" type="number" value="999"></label><label>Nome técnico<input name="name" pattern="[A-Za-z][A-Za-z0-9_]{0,79}" maxlength="80" required></label><label>Rótulo<input name="label" maxlength="200" required></label><label>Tipo de campo<select name="input"><option>text</option><option>textarea</option><option>number</option><option>currency</option><option>date</option><option>email</option><option>tel</option><option>cpf</option><option>cep</option><option>select</option></select></label><label>Opções (separadas por vírgula)<input name="options" maxlength="10000"></label></div><div class="switches"><label class="check"><input name="required" type="checkbox"> Obrigatório</label><label class="check"><input name="active" type="checkbox" checked> Ativo</label></div><div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button class="btn primary">Salvar</button></div></form>
+    </div>
+
+    <div id="contract-model-modal" class="modal xl hidden" role="dialog" aria-modal="true" aria-labelledby="contract-model-modal-title">
+      <div class="modal-head"><div><p class="eyebrow">MODELO CONTRATUAL VERSIONADO</p><h2 id="contract-model-modal-title">Editar modelo em HTML</h2></div><button class="icon-btn js-close-modal">×</button></div>
+      <form id="contract-model-form">
+        <input type="hidden" name="id">
+        <div class="form-grid two"><label class="span-2">Título do contrato<input name="title" minlength="10" maxlength="250" required></label><label>Marca d'água<input name="watermark" maxlength="100" required></label><label>Situação jurídica<select name="legalStatus"><option value="EM_REVISAO_JURIDICA">Em revisão jurídica</option><option value="APROVADO_JURIDICO">Aprovado juridicamente</option></select></label></div>
+        <div class="contract-clause-toolbar"><div><strong>Cláusulas editáveis</strong><p>A gravação cria uma nova versão; a anterior permanece preservada na auditoria.</p></div><button type="button" class="btn secondary compact" data-add-contract-clause>+ Cláusula</button></div>
+        <div id="contract-model-clauses" class="contract-model-clauses"></div>
+        <div class="modal-actions"><button type="button" class="btn ghost js-close-modal">Cancelar</button><button type="submit" class="btn primary">Salvar nova versão</button></div>
+      </form>
     </div>
 
     <div id="password-modal" class="modal hidden" role="dialog" aria-modal="true">

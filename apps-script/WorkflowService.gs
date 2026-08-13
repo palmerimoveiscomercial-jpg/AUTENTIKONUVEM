@@ -432,6 +432,8 @@ function autDocumentForReview_(actor, process, documentId) {
   autAssert_(document && String(document.ID_PROCESSO) === String(process.ID_PROCESSO) && !document.EXCLUIDO_EM,
     'Documento não encontrado neste processo.', 'NOT_FOUND');
   autAssert_(String(document.STATUS_CONFERENCIA || '') !== 'SUBSTITUIDO', 'Esta versão do documento foi substituída.', 'DOCUMENT_SUPERSEDED');
+  autAssert_(autIsDocumentStored_(document),
+    'O envio deste documento ainda não foi concluído.', 'DOCUMENT_UPLOAD_PENDING');
   return document;
 }
 
@@ -488,7 +490,7 @@ function apiConferirDocumentosValidos(token, payload, context) {
     autAssertCurrentResponsible_(actor, process);
     autAssertActorRole_(actor, ['ASSISTENTE_ADMINISTRATIVO']);
     var documents = autRowsBy_('PROCESSO_DOCUMENTOS', 'ID_PROCESSO', process.ID_PROCESSO).filter(function(row) {
-      return !row.EXCLUIDO_EM && String(row.STATUS_CONFERENCIA || 'PENDENTE_CONFERENCIA') === 'PENDENTE_CONFERENCIA';
+      return autIsDocumentStored_(row) && String(row.STATUS_CONFERENCIA || 'PENDENTE_CONFERENCIA') === 'PENDENTE_CONFERENCIA';
     });
     autAssert_(documents.length > 0, 'Não há documentos pendentes de conferência.');
     var requestKey = autClaimRequest_(actor, 'CONFERIR_DOCUMENTOS|' + process.ID_PROCESSO, context);
