@@ -41,6 +41,8 @@
     processLoadedTabs: new Set(),
     processTabVersions: new Map(),
     processTabCache: new Map(),
+    processTabFetches: new Map(),
+    processShellCache: new Map(),
     processTabScroll: new Map(),
     processViewToken: 0,
     processSyncPromise: null,
@@ -60,6 +62,7 @@
     documentFetches: new Map(),
     thumbnailMisses: new Map(),
     imageEncoderSupport: new Map(),
+    formSchemaFetches: new Map(),
     processDraftDirty: false,
     processDraftTimer: 0,
     processFormMode: 'create',
@@ -124,6 +127,7 @@
     apiUploadDocumento: 180000,
     apiAbrirProcesso: 30000,
     apiCarregarAbaProcesso: 45000,
+    apiCarregarMaisAuditoriaProcesso: 45000,
     apiMiniaturaDocumento: 30000,
     apiPrepararDocumento: 90000,
     apiLerChunkDocumento: 90000,
@@ -137,15 +141,24 @@
     apiReprocessarMidia: 30000
   };
   const BROWSER_CACHE = Object.freeze({
-    schemaVersion: '2.5.3',
+    schemaVersion: '2.5.4',
     database: 'AUTENTIKO_BROWSER_CACHE',
     store: 'entries',
     maxBytes: 96 * 1024 * 1024,
     maxEntryBytes: 8 * 1024 * 1024,
     documentTtlMs: 7 * 24 * 60 * 60 * 1000,
     thumbnailTtlMs: 7 * 24 * 60 * 60 * 1000,
-    processTabTtlMs: 5 * 60 * 1000
+    processTabTtlMs: 5 * 60 * 1000,
+    processShellTtlMs: 60 * 1000,
+    formSchemaTtlMs: 12 * 60 * 60 * 1000
   });
+  const PROCESS_TAB_TTL_MS = Object.freeze({
+    registration:10 * 60 * 1000,
+    documents:2 * 60 * 1000,
+    review:60 * 1000,
+    audit:30 * 1000
+  });
+  const AUTO_THUMBNAIL_SOURCE_LIMIT = 4 * 1024 * 1024;
   const SHORT_PROCESS_DRAFT_TTL_MS = 10 * 60 * 1000;
   const CUSTOMER_LOOKUP_TTL_MS = 10 * 60 * 1000;
   const CUSTOMER_LOOKUP_MISS_TTL_MS = 60 * 1000;
@@ -231,8 +244,21 @@
       state.browserCacheNamespace = next;
       state.browserCacheMemory.clear();
       state.processTabCache.clear();
+      state.processShellCache.clear();
+      state.processTabFetches.clear();
+      state.formSchemaFetches.clear();
       state.processTabScroll.clear();
     }
+  }
+
+  function clearProcessSessionEntries(namespace = state.browserCacheNamespace) {
+    try {
+      const prefix = `autentiko:${BROWSER_CACHE.schemaVersion}:${namespace}:`;
+      for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+        const key = sessionStorage.key(index);
+        if (key?.startsWith(prefix)) sessionStorage.removeItem(key);
+      }
+    } catch (ignoreStorageRestriction) {}
   }
 
   function browserCacheKey(kind, identity) {
@@ -310,9 +336,13 @@
 
   async function clearCurrentUserBrowserCache() {
     const namespace = state.browserCacheNamespace;
+    clearProcessSessionEntries(namespace);
     [...state.browserCacheMemory.keys()].filter(key => key.includes(`|${namespace}|`))
       .forEach(key => state.browserCacheMemory.delete(key));
     state.processTabCache.clear();
+    state.processShellCache.clear();
+    state.processTabFetches.clear();
+    state.formSchemaFetches.clear();
     state.processTabScroll.clear();
     state.documentFetches.clear();
     await initializeBrowserCache();
@@ -1172,11 +1202,23 @@
       target.innerHTML = '<div class="empty-state">Selecione o tipo de processo para carregar o formulário.</div>';
       return;
     }
-    target.innerHTML = '<div class="empty-state">Carregando formulário...</div>';
     try {
       if (!state.bootstrap.formSchemas[type]) {
-        const result = await api('apiObterFormularioProcesso', state.token, type);
+        const cached = readProcessSessionEntry('form-schema', String(type));
+        if (cached?.fields) state.bootstrap.formSchemas[type] = cached.fields;
+      }
+      if (!state.bootstrap.formSchemas[type]) {
+        target.innerHTML = '<div class="empty-state">Carregando formulário...</div>';
+        if (!state.formSchemaFetches.has(type)) {
+          state.formSchemaFetches.set(type, api('apiObterFormularioProcesso', state.token, type)
+            .finally(() => state.formSchemaFetches.delete(type)));
+        }
+        const result = await state.formSchemaFetches.get(type);
         state.bootstrap.formSchemas[type] = result.fields || [];
+        writeProcessSessionEntry('form-schema', String(type), {
+          fields:state.bootstrap.formSchemas[type],
+          expiresAt:Date.now() + BROWSER_CACHE.formSchemaTtlMs
+        });
       }
       renderDynamicForm(type, values);
     } catch (error) {
@@ -1697,35 +1739,93 @@
     return `${state.browserCacheNamespace}|${String(processId)}|${normalizeProcessTab(tab)}`;
   }
 
+  function processSessionKey(kind, identity) {
+    return `autentiko:${BROWSER_CACHE.schemaVersion}:${state.browserCacheNamespace}:${kind}:${identity}`;
+  }
+
+  function readProcessSessionEntry(kind, identity) {
+    try {
+      const key = processSessionKey(kind, identity);
+      const entry = JSON.parse(sessionStorage.getItem(key) || 'null');
+      if (!entry || Number(entry.expiresAt || 0) <= Date.now()) {
+        sessionStorage.removeItem(key);
+        return null;
+      }
+      return entry;
+    } catch (ignoreStorageRestriction) { return null; }
+  }
+
+  function writeProcessSessionEntry(kind, identity, entry) {
+    try {
+      const text = JSON.stringify(entry);
+      if (text.length <= 900000) sessionStorage.setItem(processSessionKey(kind, identity), text);
+    } catch (ignoreStorageRestriction) {}
+  }
+
+  function removeProcessSessionEntry(kind, identity) {
+    try { sessionStorage.removeItem(processSessionKey(kind, identity)); }
+    catch (ignoreStorageRestriction) {}
+  }
+
   function getProcessTabCache(processId, tab, processVersion) {
     const key = processTabCacheKey(processId, tab);
-    const entry = state.processTabCache.get(key);
+    const identity = `${String(processId)}:${normalizeProcessTab(tab)}`;
+    const entry = state.processTabCache.get(key) || readProcessSessionEntry('process-tab', identity);
     if (!entry || entry.expiresAt <= Date.now()) {
       state.processTabCache.delete(key);
+      removeProcessSessionEntry('process-tab', identity);
       return null;
     }
     if (processVersion !== undefined && processVersion !== null &&
         Number(entry.processVersion || 0) !== Number(processVersion || 0)) return null;
     entry.lastAccess = Date.now();
+    state.processTabCache.set(key, entry);
     return entry;
   }
 
   function setProcessTabCache(processId, tab, payload) {
-    state.processTabCache.set(processTabCacheKey(processId, tab), {
+    const normalized = normalizeProcessTab(tab);
+    const entry = {
       payload,
       processVersion:Number(payload?.processVersion || state.currentProcess?.process?.version || 0),
-      expiresAt:Date.now() + BROWSER_CACHE.processTabTtlMs,
+      expiresAt:Date.now() + (PROCESS_TAB_TTL_MS[normalized] || BROWSER_CACHE.processTabTtlMs),
       lastAccess:Date.now()
-    });
+    };
+    state.processTabCache.set(processTabCacheKey(processId, normalized), entry);
+    writeProcessSessionEntry('process-tab', `${String(processId)}:${normalized}`, entry);
   }
 
   function invalidateProcessTabCache(processId, tabs) {
     (tabs || ['registration','documents','review','audit']).map(normalizeProcessTab).forEach(tab => {
       state.processTabCache.delete(processTabCacheKey(processId, tab));
+      removeProcessSessionEntry('process-tab', `${String(processId)}:${tab}`);
       state.processTabVersions.delete(tab);
       const pane = $(`[data-process-detail-pane="${tab}"]`, $('#detail-content'));
       if (pane) delete pane.dataset.rendered;
     });
+  }
+
+  function getProcessShellCache(processId) {
+    const key = `${state.browserCacheNamespace}|${String(processId)}`;
+    const entry = state.processShellCache.get(key) || readProcessSessionEntry('process-shell', String(processId));
+    if (!entry || Number(entry.expiresAt || 0) <= Date.now()) {
+      state.processShellCache.delete(key);
+      removeProcessSessionEntry('process-shell', String(processId));
+      return null;
+    }
+    state.processShellCache.set(key, entry);
+    return entry;
+  }
+
+  function setProcessShellCache(processId, detail) {
+    const entry = {payload:detail, expiresAt:Date.now() + BROWSER_CACHE.processShellTtlMs};
+    state.processShellCache.set(`${state.browserCacheNamespace}|${String(processId)}`, entry);
+    writeProcessSessionEntry('process-shell', String(processId), entry);
+  }
+
+  function invalidateProcessShellCache(processId) {
+    state.processShellCache.delete(`${state.browserCacheNamespace}|${String(processId)}`);
+    removeProcessSessionEntry('process-shell', String(processId));
   }
 
   function processTabApiKey(tab) {
@@ -1775,6 +1875,8 @@
     if (payload.pending) next.pending = payload.pending;
     if (payload.activities) next.activities = payload.activities;
     if (payload.audit) next.audit = payload.audit;
+    if (payload.auditTotal !== undefined) next.auditTotal = Number(payload.auditTotal || 0);
+    if (payload.auditHasMore !== undefined) next.auditHasMore = Boolean(payload.auditHasMore);
     if (payload.movements) next.movements = payload.movements;
     if (payload.workflow) next.workflow = payload.workflow;
     if (payload.reviewReadiness) next.reviewReadiness = payload.reviewReadiness;
@@ -1818,7 +1920,7 @@
       <section class="detail-section" data-detail-section="pending"><div class="review-section-heading"><div><p class="eyebrow">PENDÊNCIAS</p><h3>Correções e confirmações</h3></div>${detail.capabilities.pending?'<span class="status-badge status-PENDENTE">Exige OK individual</span>':''}</div>${detail.capabilities.pending ? renderPendingForm() : ''}${renderPendingList(detail.pending || [])}</section>
       <section class="detail-section" data-detail-section="activities"><h3>Atuações</h3>${renderActivityForm(detail)}<div class="activity-list">${(detail.activities || []).map(renderActivity).join('') || '<p class="muted">Nenhuma atuação registrada.</p>'}</div></section>`;
     } else {
-      target.innerHTML = `<section class="detail-section audit-workspace" data-detail-section="audit"><div class="review-section-heading"><div><p class="eyebrow">TRILHA IMUTÁVEL</p><h3>Auditoria do processo</h3></div><span class="status-badge status-APROVADO">${esc((detail.audit || []).length)} registros</span></div>${renderAudit(detail.audit || [])}</section>`;
+      target.innerHTML = `<section class="detail-section audit-workspace" data-detail-section="audit"><div class="review-section-heading"><div><p class="eyebrow">TRILHA IMUTÁVEL</p><h3>Auditoria do processo</h3></div><span class="status-badge status-APROVADO">${esc(detail.auditTotal ?? (detail.audit || []).length)} registros</span></div>${renderAudit(detail.audit || [], detail)}</section>`;
     }
     target.dataset.rendered = String(state.processTabVersions.get(normalized) || detail.process?.version || 1);
     if (modal) requestAnimationFrame(() => { modal.scrollTop = scrollTop; });
@@ -1844,7 +1946,13 @@
     }
     if (target) target.innerHTML = processPaneLoading(normalized);
     try {
-      const payload = await api('apiCarregarAbaProcesso', state.token, processId, processTabApiKey(normalized));
+      const fetchKey = `${processId}|${normalized}`;
+      if (!state.processTabFetches.has(fetchKey)) {
+        state.processTabFetches.set(fetchKey,
+          api('apiCarregarAbaProcesso', state.token, processId, processTabApiKey(normalized))
+            .finally(() => state.processTabFetches.delete(fetchKey)));
+      }
+      const payload = await state.processTabFetches.get(fetchKey);
       if (viewToken !== state.processViewToken || state.currentProcess?.process?.id !== processId) return;
       setProcessTabCache(processId, normalized, payload);
       state.currentProcess = mergeProcessTab(state.currentProcess, normalized, payload);
@@ -1863,21 +1971,48 @@
     state.processTabVersions = new Map();
     state.currentProcess = null;
     openModal('detail-modal');
-    $('#detail-action-header').innerHTML = '<div class="process-action-loading"><span class="mini-spinner"></span> Preparando ações...</div>';
-    $('#detail-content').innerHTML = processPaneLoading(state.processDetailTab);
+    const shellCached = getProcessShellCache(id);
+    const tabCached = getProcessTabCache(id, state.processDetailTab, shellCached?.payload?.process?.version);
+    let renderedFromCache = false;
+    if (shellCached?.payload && tabCached?.payload) {
+      state.currentProcess = mergeProcessTab(shellCached.payload, state.processDetailTab, tabCached.payload);
+      renderProcessShell(state.currentProcess);
+      renderProcessPane(state.processDetailTab, state.currentProcess);
+      renderedFromCache = true;
+    } else if (shellCached?.payload) {
+      state.currentProcess = shellCached.payload;
+      renderProcessShell(state.currentProcess);
+    } else {
+      $('#detail-action-header').innerHTML = '<div class="process-action-loading"><span class="mini-spinner"></span> Preparando ações...</div>';
+      $('#detail-content').innerHTML = processPaneLoading(state.processDetailTab);
+    }
     try {
-      const cached = getProcessTabCache(id, state.processDetailTab);
       const detailPromise = api('apiAbrirProcesso', state.token, id);
-      let tabPayload = cached?.payload || await api('apiCarregarAbaProcesso', state.token, id, processTabApiKey(state.processDetailTab));
-      const detail = await detailPromise;
-      if (cached && Number(cached.processVersion || 0) !== Number(detail.process?.version || 0)) {
-        tabPayload = await api('apiCarregarAbaProcesso', state.token, id, processTabApiKey(state.processDetailTab));
+      const coldTabPromise = tabCached?.payload ? null :
+        api('apiCarregarAbaProcesso', state.token, id, processTabApiKey(state.processDetailTab));
+      let detail;
+      let coldTabPayload = null;
+      if (coldTabPromise) [detail, coldTabPayload] = await Promise.all([detailPromise, coldTabPromise]);
+      else detail = await detailPromise;
+      if (viewToken !== state.processViewToken) return;
+      setProcessShellCache(id, detail);
+      const validCached = getProcessTabCache(id, state.processDetailTab, detail.process?.version);
+      let tabPayload = validCached?.payload;
+      if (!tabPayload) {
+        invalidateProcessTabCache(id, [state.processDetailTab]);
+        tabPayload = coldTabPayload || await api('apiCarregarAbaProcesso', state.token, id, processTabApiKey(state.processDetailTab));
       }
       if (viewToken !== state.processViewToken) return;
       setProcessTabCache(id, state.processDetailTab, tabPayload);
       state.currentProcess = mergeProcessTab(detail, state.processDetailTab, tabPayload);
-      renderProcessShell(state.currentProcess);
-      renderProcessPane(state.processDetailTab, state.currentProcess);
+      if (!renderedFromCache || !validCached) {
+        renderProcessShell(state.currentProcess);
+        renderProcessPane(state.processDetailTab, state.currentProcess);
+      } else {
+        $('#detail-protocol').textContent = `PROTOCOLO ${state.currentProcess.process.protocol}`;
+        $('#detail-title').textContent = state.currentProcess.process.clientName || 'Detalhes do processo';
+        $('#detail-action-header').innerHTML = renderProcessActionHeader(state.currentProcess);
+      }
     } catch (error) {
       if (viewToken !== state.processViewToken) return;
       $('#detail-action-header').innerHTML = '';
@@ -2198,7 +2333,7 @@
         const previous = state.visualObjectUrls.get(documentId);
         if (previous) revokeObjectUrl(previous);
         state.visualObjectUrls.set(documentId, url);
-        target.innerHTML = `<img src="${esc(url)}" alt="Miniatura de ${esc(file.fileName)}">`;
+        target.innerHTML = `<img src="${esc(url)}" alt="Miniatura de ${esc(file.fileName)}" loading="lazy" decoding="async">`;
         target.classList.remove('loading');
         card.dataset.thumbnailState = 'loaded';
         $('[data-load-visual-thumb]', card)?.classList.add('hidden');
@@ -2289,18 +2424,22 @@
       }
     }
     let file;
+    const documentMetadata = (state.currentProcess?.documents || []).find(item => String(item.id) === String(documentId));
+    const sourceSize = Number(documentMetadata?.size || cloudMetadata?.size || 0);
+    const automaticLocalFallbackAllowed = sourceSize > 0 && sourceSize <= AUTO_THUMBNAIL_SOURCE_LIMIT;
     try {
       file = await api('apiMiniaturaDocumento', state.token, documentId, state.context);
     } catch (error) {
       if (['PREVIEW_TOO_LARGE','THUMBNAIL_TOO_LARGE'].includes(String(error?.code || ''))) {
-        return createThumbnailFromStoredDocument(documentId, '');
+        if (options.allowSourceFallback || automaticLocalFallbackAllowed) return createThumbnailFromStoredDocument(documentId, '');
+        return {available:false, sourceMimeType:documentMetadata?.mimeType || '', errorCode:'THUMBNAIL_SOURCE_TOO_LARGE', fallbackAllowed:true, message:'PDF grande: a miniatura será gerada somente quando você solicitar.'};
       }
       throw error;
     }
     if (!file.available || !file.base64) {
       const canGenerateLocally = options.allowSourceFallback ||
-        file.fallbackAllowed ||
-        ['PREVIEW_TOO_LARGE','THUMBNAIL_TOO_LARGE'].includes(String(file.errorCode || ''));
+        (automaticLocalFallbackAllowed && (file.fallbackAllowed ||
+          ['PREVIEW_TOO_LARGE','THUMBNAIL_TOO_LARGE'].includes(String(file.errorCode || ''))));
       if (canGenerateLocally && file.errorCode !== 'DOCUMENT_FILE_UNAVAILABLE') {
         try { return await createThumbnailFromStoredDocument(documentId, file.sourceMimeType); }
         catch (fallbackError) {
@@ -2340,13 +2479,15 @@
     const cards = $$('[data-visual-document]', $('[data-process-detail-pane="documents"]'))
       .filter(card => !card.dataset.thumbnailState && previewSupported(card.dataset.documentMime));
     if (!cards.length || !state.currentProcess?.capabilities?.download) return;
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    state.visualThumbnailConcurrency = connection?.saveData || ['slow-2g','2g'].includes(String(connection?.effectiveType || '')) ? 1 : 2;
     if ('IntersectionObserver' in window) {
       state.visualObserver = new IntersectionObserver(entries => {
         entries.filter(entry => entry.isIntersecting).forEach(entry => {
           state.visualObserver?.unobserve(entry.target);
           enqueueVisualThumbnail(entry.target.dataset.visualDocument);
         });
-      }, {root:$('#detail-modal'), rootMargin:'240px'});
+      }, {root:$('#detail-modal'), rootMargin:'120px 0px'});
       cards.forEach(card => state.visualObserver.observe(card));
       return;
     }
@@ -2735,9 +2876,24 @@
     return `<div class="data-table-wrap"><table class="data-table"><thead><tr><th>Título</th><th>Responsável</th><th>Prazo</th><th>Status</th><th>Confirmação</th></tr></thead><tbody>${items.map(item => `<tr data-pending-row="${esc(item.id)}"><td><strong>${esc(item.title)}</strong><br><small>${esc(item.description)}</small></td><td>${esc(item.responsible)}</td><td>${esc(item.dueDate||'—')}</td><td>${esc(statusText(item.status))}</td><td>${item.status!=='CONCLUIDA'&&hasPermission('PENDENCIA_GERIR')?`<button class="btn success compact" data-complete-pending="${esc(item.id)}">✓ OK da pendência</button>`:`<span class="inline-ok-proof">✓ Resolvida${item.completedBy?` por ${esc(item.completedBy)}`:''}</span>`}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
-  function renderAudit(items) {
+  function renderAudit(items, detail = state.currentProcess) {
     if (!items.length) return '<p class="muted">Auditoria não disponível para este perfil.</p>';
-    return `<div class="audit-table data-table-wrap"><table class="data-table"><thead><tr><th>Data/hora</th><th>Usuário e perfil</th><th>Ação</th><th>Contexto técnico</th><th>Detalhes</th><th>Hash</th></tr></thead><tbody>${items.map(item => `<tr><td>${dateText(item.at)}<br><small>${esc(item.timezone||'—')}</small></td><td>${esc(item.user)}<br><small>${esc(roleText(item.role)||'—')} · sessão ${esc(String(item.sessionId||'').slice(0,10)||'—')}</small></td><td>${esc(statusText(item.action))}</td><td><small>IP: ${esc(item.ipPublic||'indisponível')}<br>${esc(item.device?.platform||'')} · ${esc(String(item.device?.userAgent||'').slice(0,90))}${item.location?.latitude?`<br>Localização autorizada: ${esc(item.location.latitude)}, ${esc(item.location.longitude)}`:''}</small></td><td>${esc(JSON.stringify(item.details))}</td><td title="${esc(item.hash)}">${esc(String(item.hash).slice(0,12))}…</td></tr>`).join('')}</tbody></table></div>`;
+    return `<div class="audit-table data-table-wrap"><table class="data-table"><thead><tr><th>Data/hora</th><th>Usuário e perfil</th><th>Ação</th><th>Contexto técnico</th><th>Detalhes</th><th>Hash</th></tr></thead><tbody>${items.map(item => `<tr><td>${dateText(item.at)}<br><small>${esc(item.timezone||'—')}</small></td><td>${esc(item.user)}<br><small>${esc(roleText(item.role)||'—')} · sessão ${esc(String(item.sessionId||'').slice(0,10)||'—')}</small></td><td>${esc(statusText(item.action))}</td><td><small>IP: ${esc(item.ipPublic||'indisponível')}<br>${esc(item.device?.platform||'')} · ${esc(String(item.device?.userAgent||'').slice(0,90))}${item.location?.latitude?`<br>Localização autorizada: ${esc(item.location.latitude)}, ${esc(item.location.longitude)}`:''}</small></td><td>${esc(JSON.stringify(item.details))}</td><td title="${esc(item.hash)}">${esc(String(item.hash).slice(0,12))}…</td></tr>`).join('')}</tbody></table></div>${detail?.auditHasMore?`<div class="audit-load-more"><button type="button" class="btn secondary compact" data-load-more-audit>Carregar mais registros</button><small>${esc(items.length)} de ${esc(detail.auditTotal || items.length)} exibidos</small></div>`:''}`;
+  }
+
+  async function loadMoreProcessAudit(button) {
+    const processId = state.currentProcess?.process?.id;
+    if (!processId) return;
+    setBusy(button, true, 'Carregando...');
+    try {
+      const payload = await api('apiCarregarMaisAuditoriaProcesso', state.token, processId, (state.currentProcess.audit || []).length, 60);
+      if (state.currentProcess?.process?.id !== processId) return;
+      state.currentProcess.audit = [...(state.currentProcess.audit || []), ...(payload.audit || [])];
+      state.currentProcess.auditTotal = Number(payload.auditTotal || state.currentProcess.audit.length);
+      state.currentProcess.auditHasMore = Boolean(payload.auditHasMore);
+      renderProcessPane('audit', state.currentProcess);
+    } catch (error) { toast(error.message, 'error'); }
+    finally { if (button?.isConnected) setBusy(button, false); }
   }
 
   function scheduleProcessListRefresh() {
@@ -2763,6 +2919,7 @@
       if (state.currentProcess?.process?.id !== processId) return;
       const previous = state.currentProcess;
       const previousCategories = previous.workflow?.categories || [];
+      setProcessShellCache(processId, base);
       state.currentProcess = {
         ...previous,
         ...base,
@@ -4914,6 +5071,7 @@
       const contractQueue=event.target.closest('[data-contract-queue]');if(contractQueue){state.contractQueue=contractQueue.dataset.contractQueue;return loadContracts();}
       const processTab=event.target.closest('[data-process-detail-tab]');if(processTab){activateProcessTab(processTab.dataset.processDetailTab);return;}
       const retryProcessTab=event.target.closest('[data-retry-process-tab]');if(retryProcessTab){ensureProcessTab(retryProcessTab.dataset.retryProcessTab,true);return;}
+      const moreAudit=event.target.closest('[data-load-more-audit]');if(moreAudit){loadMoreProcessAudit(moreAudit);return;}
       const detailJump=event.target.closest('[data-jump-detail-section]');if(detailJump){jumpToDetailSection(detailJump.dataset.jumpDetailSection);return;}
       const loadThumb=event.target.closest('[data-load-visual-thumb]');if(loadThumb){setBusy(loadThumb,true,'Gerando...');await loadVisualThumbnail(loadThumb.dataset.loadVisualThumb,{force:true,allowSourceFallback:true,manual:true});if(loadThumb.isConnected)setBusy(loadThumb,false);return;}
       const dropzone=event.target.closest('[data-document-dropzone]');if(dropzone&&!event.target.matches('.document-file-input')){dropzone.querySelector('.document-file-input')?.click();return;}

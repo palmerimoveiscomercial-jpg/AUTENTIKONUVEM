@@ -524,7 +524,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, 683);
-  assert.equal(diagnostic.codeVersion, '2.5.3');
+  assert.equal(diagnostic.codeVersion, '2.5.4');
   assert.ok(diagnostic.maxFormCacheBytes < 15_000);
 });
 
@@ -760,6 +760,7 @@ check('modal leve e quatro abas carregadas de forma independente', () => {
   const browserRegistration = data(context.apiCarregarAbaProcesso(token, processId, 'REGISTRATION'));
   assert.equal(browserRegistration.tab, 'CADASTRO');
   assert.ok(browserRegistration.data);
+  assert.equal(browserRegistration.cacheHit, true);
 
   const documents = data(context.apiCarregarAbaProcesso(token, processId, 'DOCUMENTOS'));
   assert.equal(documents.tab, 'DOCUMENTOS');
@@ -779,6 +780,10 @@ check('modal leve e quatro abas carregadas de forma independente', () => {
   const audit = data(context.apiCarregarAbaProcesso(token, processId, 'AUDITORIA'));
   assert.equal(audit.tab, 'AUDITORIA');
   assert.ok(Array.isArray(audit.audit));
+  assert.equal(audit.audit.length <= 60, true);
+  assert.equal(typeof audit.auditTotal, 'number');
+  const auditNextPage = data(context.apiCarregarMaisAuditoriaProcesso(token, processId, audit.audit.length, 60));
+  assert.equal(Array.isArray(auditNextPage.audit), true);
   assert.equal('documents' in audit, false);
   assert.equal('data' in audit, false);
 });

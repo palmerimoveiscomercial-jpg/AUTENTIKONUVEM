@@ -607,10 +607,32 @@ function autProcessReviewTab_(user, process) {
   };
 }
 
-function autProcessAuditTab_(user, process) {
+function autProcessAuditTab_(user, process, offset, limit) {
   var canAudit = autHasPermission_(user, 'AUDITORIA_VER') ||
     String(process.ID_CRIADOR) === String(user.ID_USUARIO);
-  return { audit: canAudit ? autAuditForEntity_('PROCESSO', process.ID_PROCESSO) : [] };
+  if (!canAudit) return { audit: [], auditTotal: 0, auditOffset: 0, auditHasMore: false };
+  var rows = autAuditForEntity_('PROCESSO', process.ID_PROCESSO);
+  var start = Math.max(0, Number(offset || 0));
+  var pageSize = Math.max(1, Math.min(100, Number(limit || 60)));
+  return {
+    audit: rows.slice(start, start + pageSize),
+    auditTotal: rows.length,
+    auditOffset: start,
+    auditHasMore: start + pageSize < rows.length
+  };
+}
+
+function autProcessTabCacheKey_(user, process, tab) {
+  return 'AUT_PROCESS_TAB_254_' + autHash_([
+    user.ID_USUARIO,
+    process.ID_PROCESSO,
+    tab,
+    autProcessVersion_(process)
+  ].join('|'));
+}
+
+function autProcessTabCacheSeconds_(tab) {
+  return { CADASTRO: 600, DOCUMENTOS: 120, REVISAO: 60, AUDITORIA: 30 }[tab] || 60;
 }
 
 function apiAbrirProcesso(token, processId) {
@@ -640,6 +662,16 @@ function apiCarregarAbaProcesso(token, processId, tab) {
       REVIEW: 'REVISAO',
       AUDIT: 'AUDITORIA'
     }[key] || key;
+    var cache = CacheService.getScriptCache();
+    var cacheKey = autProcessTabCacheKey_(user, process, key);
+    var cachedText = cache.get(cacheKey);
+    if (cachedText) {
+      var cached = autJsonParse_(cachedText, null);
+      if (cached) {
+        cached.cacheHit = true;
+        return autResult_(cached);
+      }
+    }
     var data;
     if (key === 'CADASTRO') data = autProcessRegistrationTab_(user, process);
     else if (key === 'DOCUMENTOS') data = autProcessDocumentsTab_(user, process);
@@ -648,6 +680,19 @@ function apiCarregarAbaProcesso(token, processId, tab) {
     else autAssert_(false, 'Aba de processo inválida.', 'INVALID_PROCESS_TAB');
     data.processVersion = autProcessVersion_(process);
     data.tab = key;
+    data.cacheHit = false;
+    autCachePut_(cache, cacheKey, data, autProcessTabCacheSeconds_(key));
+    return autResult_(data);
+  } catch (err) { return autPublicError_(err); }
+}
+
+function apiCarregarMaisAuditoriaProcesso(token, processId, offset, limit) {
+  try {
+    var user = autRequireAuth_(token);
+    var process = autRequireProcess_(user, processId);
+    var data = autProcessAuditTab_(user, process, offset, limit);
+    data.processVersion = autProcessVersion_(process);
+    data.tab = 'AUDITORIA';
     return autResult_(data);
   } catch (err) { return autPublicError_(err); }
 }

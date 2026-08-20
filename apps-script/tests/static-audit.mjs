@@ -285,8 +285,12 @@ check('modal estável com quatro abas e carregamento sob demanda', () => {
   assert.match(serverSource, /REGISTRATION:\s*'CADASTRO'/);
   assert.match(scriptsHtml, /function syncProcessAfterMutation/);
   assert.match(scriptsHtml, /if \(payload\.formFields\) next\.formFields = payload\.formFields/);
-  assert.match(scriptsHtml, /const detailPromise = api\('apiAbrirProcesso'/);
-  assert.match(scriptsHtml, /getProcessTabCache\(id, state\.processDetailTab\)/);
+  assert.match(scriptsHtml, /const shellCached = getProcessShellCache\(id\)/);
+  assert.match(scriptsHtml, /getProcessTabCache\(id, state\.processDetailTab, shellCached\?\.payload\?\.process\?\.version\)/);
+  assert.match(scriptsHtml, /writeProcessSessionEntry\('process-tab'/);
+  assert.match(scriptsHtml, /PROCESS_TAB_TTL_MS/);
+  assert.match(serverSource, /AUT_PROCESS_TAB_254_/);
+  assert.match(serverSource, /function apiCarregarMaisAuditoriaProcesso/);
   assert.match(scriptsHtml, /const \[base, tabPayload\] = await Promise\.all/);
   assert.match(scriptsHtml, /processLoadedTabs:\s*new Set/);
   assert.match(scriptsHtml, /data-process-detail-tab="registration"/);
@@ -322,7 +326,7 @@ check('cache seguro, resistente e sem recarregar prévias ou abas', () => {
   assert.match(scriptsHtml, /if \(!rendered\) renderProcessPane/);
   assert.doesNotMatch(scriptsHtml, /state\.processLoadedTabs\.has\(normalized\)\)\s*\{\s*renderProcessPane/);
   assert.match(scriptsHtml, /state\.processTabScroll\.set/);
-  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.3'/);
+  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.4'/);
   assert.match(scriptsHtml, /canvasToBoundedThumbnailBlob\(canvas, preferredType, 80 \* 1024\)/);
   assert.match(scriptsHtml, /maxWidth = 360/);
   assert.match(scriptsHtml, /maxHeight = 270/);
