@@ -79,6 +79,8 @@
     databaseMatch: null,
     databaseLookupTimer: 0,
     databaseLookupNonce: 0,
+    databaseLookupCache: new Map(),
+    databaseLookupPending: new Map(),
     propertyLookupTimer: 0,
     context: {
       device: {
@@ -117,6 +119,7 @@
   const API_TIMEOUTS = {
     apiPublicBootstrap: 20000,
     apiBootstrap: 30000,
+    apiBuscarCadastroPorDocumento: 15000,
     apiUploadDocumentoForm: 180000,
     apiUploadDocumento: 180000,
     apiAbrirProcesso: 30000,
@@ -134,7 +137,7 @@
     apiReprocessarMidia: 30000
   };
   const BROWSER_CACHE = Object.freeze({
-    schemaVersion: '2.5.2',
+    schemaVersion: '2.5.3',
     database: 'AUTENTIKO_BROWSER_CACHE',
     store: 'entries',
     maxBytes: 96 * 1024 * 1024,
@@ -144,6 +147,8 @@
     processTabTtlMs: 5 * 60 * 1000
   });
   const SHORT_PROCESS_DRAFT_TTL_MS = 10 * 60 * 1000;
+  const CUSTOMER_LOOKUP_TTL_MS = 10 * 60 * 1000;
+  const CUSTOMER_LOOKUP_MISS_TTL_MS = 60 * 1000;
 
   function readCookie(name) {
     const prefix = `${encodeURIComponent(name)}=`;
@@ -222,6 +227,7 @@
   function configureBrowserCacheForUser(user) {
     const next = String(user?.id || user?.email || 'authenticated').toLowerCase();
     if (state.browserCacheNamespace !== next) {
+      clearCustomerLookupCache();
       state.browserCacheNamespace = next;
       state.browserCacheMemory.clear();
       state.processTabCache.clear();
@@ -699,6 +705,7 @@
 
   function endSession(showMessage = true) {
     void clearCurrentUserBrowserCache();
+    clearCustomerLookupCache();
     state.token = '';
     state.bootstrap = null;
     state.admin = null;
@@ -912,6 +919,7 @@
     setBusy(button, true, 'Salvando...');
     try {
       await api('apiSalvarCadastroCliente', state.token, data, {...state.context, requestId:data.requestId});
+      clearCustomerLookupCache(data.document);
       closeModal(true);
       toast('Cadastro mestre atualizado e auditado.', 'success');
       await loadCustomerDatabase(state.database.clientPage);
@@ -1345,6 +1353,67 @@
     input.setCustomValidity(type==='PJ'?(digits.length&&!cnpjIsValid(digits)?'CNPJ inválido.':''):(digits.length&&!cpfIsValid(digits)?'CPF inválido.':''));
   }
 
+  function customerLookupStorageKey(digits) {
+    return `autentiko_customer_lookup:${state.browserCacheNamespace}:${digits}`;
+  }
+
+  function clearCustomerLookupCache(digits = '') {
+    const canonical = String(digits || '').replace(/\D/g, '');
+    if (canonical) {
+      state.databaseLookupCache.delete(canonical);
+      try { sessionStorage.removeItem(customerLookupStorageKey(canonical)); } catch (ignoreLookupStorage) {}
+      return;
+    }
+    state.databaseLookupCache.clear();
+    state.databaseLookupPending.clear();
+    try {
+      const prefix = `autentiko_customer_lookup:${state.browserCacheNamespace}:`;
+      for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+        const key = sessionStorage.key(index);
+        if (key && key.startsWith(prefix)) sessionStorage.removeItem(key);
+      }
+    } catch (ignoreLookupStorage) {}
+  }
+
+  function readCustomerLookupCache(digits) {
+    const canonical = String(digits || '').replace(/\D/g, '');
+    const memory = state.databaseLookupCache.get(canonical);
+    if (memory && memory.expiresAt > Date.now()) return memory.result;
+    if (memory) state.databaseLookupCache.delete(canonical);
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(customerLookupStorageKey(canonical)) || 'null');
+      if (!stored || stored.owner !== state.browserCacheNamespace || stored.expiresAt <= Date.now()) {
+        sessionStorage.removeItem(customerLookupStorageKey(canonical));
+        return null;
+      }
+      state.databaseLookupCache.set(canonical, stored);
+      return stored.result;
+    } catch (ignoreLookupStorage) { return null; }
+  }
+
+  function writeCustomerLookupCache(digits, result) {
+    const canonical = String(digits || '').replace(/\D/g, '');
+    if (!canonical || !result) return result;
+    const ttl = result.found ? CUSTOMER_LOOKUP_TTL_MS : CUSTOMER_LOOKUP_MISS_TTL_MS;
+    const entry = {owner:state.browserCacheNamespace, result, expiresAt:Date.now() + ttl};
+    state.databaseLookupCache.set(canonical, entry);
+    try { sessionStorage.setItem(customerLookupStorageKey(canonical), JSON.stringify(entry)); }
+    catch (ignoreLookupStorage) {}
+    return result;
+  }
+
+  function lookupCustomerByDocument(digits) {
+    const canonical = String(digits || '').replace(/\D/g, '');
+    const cached = readCustomerLookupCache(canonical);
+    if (cached) return Promise.resolve({...cached, cacheHit:true});
+    if (state.databaseLookupPending.has(canonical)) return state.databaseLookupPending.get(canonical);
+    const pending = api('apiBuscarCadastroPorDocumento', state.token, canonical, state.context)
+      .then(result => writeCustomerLookupCache(canonical, result))
+      .finally(() => state.databaseLookupPending.delete(canonical));
+    state.databaseLookupPending.set(canonical, pending);
+    return pending;
+  }
+
   function scheduleParticipantDatabaseLookup(input) {
     const form=input?.closest('#participant-form');
     if(!form)return;
@@ -1357,7 +1426,7 @@
     state.databaseLookupTimer=setTimeout(async()=>{
       if(input.value.replace(/\D/g,'')!==digits||input.dataset.databaseChecked===digits)return;
       try{
-        const result=await api('apiBuscarCadastroPorDocumento',state.token,digits,state.context);
+        const result=await lookupCustomerByDocument(digits);
         input.dataset.databaseChecked=digits;
         if(!result.found||activeModalId()!=='participant-modal')return;
         if(!confirm(`Encontramos ${result.item.name} na Carta de Clientes. Deseja preencher os campos vazios deste participante?`))return;
@@ -1373,7 +1442,7 @@
         maskParticipantDocument(input);
         toast(`${changed} campo(s) do participante preenchido(s). Revise antes de salvar.`,'success');
       }catch(error){input.dataset.databaseChecked='';toast(error.message,'error');}
-    },450);
+    },60);
   }
 
   function validateCpfField(input) {
@@ -1419,11 +1488,14 @@
     if (input.dataset.databaseChecked === digits) return;
     clearTimeout(state.databaseLookupTimer);
     const nonce = ++state.databaseLookupNonce;
+    const validationMessage = input.closest('.field-label')?.querySelector('.field-validation-message');
+    if (validationMessage) validationMessage.textContent = 'CPF válido — consultando a Carta de Clientes...';
     state.databaseLookupTimer = setTimeout(async () => {
       if (input.value.replace(/\D/g, '') !== digits || input.dataset.databaseChecked === digits) return;
       try {
-        const result = await api('apiBuscarCadastroPorDocumento', state.token, digits, state.context);
+        const result = await lookupCustomerByDocument(digits);
         input.dataset.databaseChecked = digits;
+        if (validationMessage) validationMessage.textContent = result.found ? 'CPF válido — cadastro localizado.' : 'CPF válido.';
         if (nonce !== state.databaseLookupNonce || !result.found || activeModalId() !== 'process-modal') return;
         const targets = processPartyTargets();
         const inferred = input.name.replace(/_cpf$/, '');
@@ -1435,9 +1507,10 @@
         openModal('database-match-modal');
       } catch (error) {
         input.dataset.databaseChecked = '';
+        if (validationMessage) validationMessage.textContent = 'CPF válido — não foi possível consultar agora.';
         if (!['INVALID_DOCUMENT','NOT_FOUND'].includes(error.code)) toast(error.message, 'error');
       }
-    }, 450);
+    }, 60);
   }
 
   function closeDatabaseMatch() {

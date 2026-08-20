@@ -141,6 +141,9 @@ function autAppend_(name, obj) {
     var headers = autHeaders_(sheet);
     var row = headers.map(function(header) { return autSafeCell_(obj[header]); });
     var rowNumber = Math.max(sheet.getLastRow(), 1) + 1;
+    if (name === 'BASE_CLIENTES' && typeof autMasterInvalidateLookupCache_ === 'function') {
+      autMasterInvalidateLookupCache_(obj.TIPO_PESSOA, obj.CPF_CNPJ);
+    }
     sheet.getRange(rowNumber, 1, 1, headers.length).setValues([row]);
     return rowNumber;
   });
@@ -164,6 +167,10 @@ function autUpdateRow_(name, rowNumber, patch) {
     var headers = autHeaders_(sheet);
     var range = sheet.getRange(rowNumber, 1, 1, headers.length);
     var row = range.getValues()[0];
+    if (name === 'BASE_CLIENTES' && typeof autMasterInvalidateLookupCache_ === 'function') {
+      autMasterInvalidateLookupCache_(row[headers.indexOf('TIPO_PESSOA')], row[headers.indexOf('CPF_CNPJ')]);
+      autMasterInvalidateLookupCache_(patch.TIPO_PESSOA || row[headers.indexOf('TIPO_PESSOA')], patch.CPF_CNPJ || row[headers.indexOf('CPF_CNPJ')]);
+    }
     headers.forEach(function(header, index) {
       if (Object.prototype.hasOwnProperty.call(patch, header)) row[index] = autSafeCell_(patch[header]);
     });
@@ -195,6 +202,9 @@ function autPatchRows_(name, rowNumbers, patch) {
       var range = sheet.getRange(group.start, 1, group.count, headers.length);
       var values = range.getValues();
       values.forEach(function(row) {
+        if (name === 'BASE_CLIENTES' && typeof autMasterInvalidateLookupCache_ === 'function') {
+          autMasterInvalidateLookupCache_(row[headers.indexOf('TIPO_PESSOA')], row[headers.indexOf('CPF_CNPJ')]);
+        }
         headers.forEach(function(header, column) {
           if (Object.prototype.hasOwnProperty.call(patch, header)) row[column] = autSafeCell_(patch[header]);
         });

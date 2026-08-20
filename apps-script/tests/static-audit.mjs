@@ -322,7 +322,7 @@ check('cache seguro, resistente e sem recarregar prévias ou abas', () => {
   assert.match(scriptsHtml, /if \(!rendered\) renderProcessPane/);
   assert.doesNotMatch(scriptsHtml, /state\.processLoadedTabs\.has\(normalized\)\)\s*\{\s*renderProcessPane/);
   assert.match(scriptsHtml, /state\.processTabScroll\.set/);
-  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.1'/);
+  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.3'/);
   assert.match(scriptsHtml, /canvasToBoundedThumbnailBlob\(canvas, preferredType, 80 \* 1024\)/);
   assert.match(scriptsHtml, /maxWidth = 360/);
   assert.match(scriptsHtml, /maxHeight = 270/);
@@ -517,6 +517,11 @@ check('Carta de Clientes, imóveis e autopreenchimento são normalizados e prote
   assert.match(indexHtml, /id="database-view"/);
   assert.match(indexHtml, /id="database-match-modal"/);
   assert.match(scriptsHtml, /function scheduleCustomerDatabaseLookup/);
+  assert.match(scriptsHtml, /function lookupCustomerByDocument/);
+  assert.match(scriptsHtml, /CUSTOMER_LOOKUP_TTL_MS = 10 \* 60 \* 1000/);
+  assert.match(scriptsHtml, /}, 60\);/);
+  assert.match(serverSource, /function autMasterPrimeLookupCache_/);
+  assert.match(serverSource, /AUT_MASTER_LOOKUP_AUDIT_253_/);
   assert.match(scriptsHtml, /Notamos que o CPF informado possui registro em nossa base de dados/);
   assert.match(scriptsHtml, /function applyDatabaseMatch/);
   assert.match(scriptsHtml, /Você pode revisar e editar qualquer informação antes de salvar/);

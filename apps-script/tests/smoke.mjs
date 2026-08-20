@@ -524,7 +524,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, 683);
-  assert.equal(diagnostic.codeVersion, '2.5.2');
+  assert.equal(diagnostic.codeVersion, '2.5.3');
   assert.ok(diagnostic.maxFormCacheBytes < 15_000);
 });
 
@@ -617,6 +617,9 @@ check('Carta de Clientes deduplica CPF, permite busca e edição autorizada', ()
   const match = data(context.apiBuscarCadastroPorDocumento(token, '529.982.247-25', { requestId: 'lookup-master-cpf' }));
   assert.equal(match.found, true);
   assert.equal(match.item.document, '52998224725');
+  assert.ok(cache.entries.has(context.autMasterLookupCacheKey_('PF', '52998224725')), 'o perfil deve permanecer pré-aquecido no cache seguro');
+  const cachedMatch = data(context.apiBuscarCadastroPorDocumento(token, '52998224725', { requestId: 'lookup-master-cpf-cache' }));
+  assert.equal(cachedMatch.item.id, match.item.id, 'a consulta repetida deve reutilizar o mesmo cadastro');
   const full = data(context.apiObterCadastroCliente(token, clients.items[0].id));
   const saved = data(context.apiSalvarCadastroCliente(token, {
     id: full.item.id, expectedVersion: full.item.version, personType: 'PF', document: full.item.document,
@@ -629,6 +632,7 @@ check('Carta de Clientes deduplica CPF, permite busca e edição autorizada', ()
   assert.equal(refreshed.name, 'Cliente Mestre Revisado');
   assert.equal(refreshed.income, 9000);
   assert.equal(refreshed.address.city, 'Belém');
+  assert.equal(cache.entries.has(context.autMasterLookupCacheKey_('PF', '52998224725')), false, 'editar o cadastro precisa invalidar a resposta anterior');
   assert.equal(context.autRowsBy_('BASE_CLIENTES', 'CPF_CNPJ', '52998224725').length, 1);
 });
 

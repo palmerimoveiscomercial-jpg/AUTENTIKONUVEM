@@ -1195,6 +1195,7 @@ function autMasterUpsertClient_(actor, profile, process, source, context, option
     patch.CRIADO_EM = now; patch.CRIADO_POR = actor && actor.NOME || 'MIGRACAO';
     patch.ATUALIZADO_EM = now; patch.ATUALIZADO_POR = actor && actor.NOME || 'MIGRACAO';
     patch.CONFLITOS_ABERTOS = 0; patch.QUALIDADE = autMasterQuality_(patch);
+    autMasterInvalidateLookupCache_(type, document);
     autAppend_('BASE_CLIENTES', patch);
     if (!options.silentAudit) autAudit_(actor, 'BASE_CLIENTE_CRIADO', 'BASE_CLIENTE', id, { documentoHash: autHash_(document), fonte: source, processo: processId }, context);
     return { id: id, created: true, conflicts: 0 };
@@ -1211,6 +1212,8 @@ function autMasterUpsertClient_(actor, profile, process, source, context, option
     });
     if (!materialChange) return { id: existing.ID_CADASTRO, created: false, conflicts: 0, unchanged: true };
   }
+  autMasterInvalidateLookupCache_(existing.TIPO_PESSOA, existing.CPF_CNPJ);
+  autMasterInvalidateLookupCache_(type, document);
   autUpdateRow_('BASE_CLIENTES', existing._row, patch);
   if (!options.silentAudit) autAudit_(actor, conflicts ? 'BASE_CLIENTE_CONFLITO_REGISTRADO' : 'BASE_CLIENTE_ATUALIZADO', 'BASE_CLIENTE', existing.ID_CADASTRO, { documentoHash: autHash_(document), fonte: source, processo: processId, conflitos: conflicts }, context);
   return { id: existing.ID_CADASTRO, created: false, conflicts: conflicts };
@@ -1363,6 +1366,48 @@ function autMasterClientPublic_(row, full) {
   return result;
 }
 
+function autMasterLookupCacheKey_(type, document) {
+  var canonical = autMasterCanonicalDocument_(type, document);
+  return canonical ? 'AUT_MASTER_LOOKUP_253_' + autHash_(String(type || '') + '|' + canonical) : '';
+}
+
+function autMasterInvalidateLookupCache_(type, document) {
+  var cache = CacheService.getScriptCache();
+  var canonical = autMasterCanonicalDocument_(type, document);
+  if (!canonical) return;
+  ['PF', 'PJ', ''].forEach(function(personType) {
+    var key = autMasterLookupCacheKey_(personType, canonical);
+    if (key) cache.remove(key);
+  });
+  cache.remove('AUT_MASTER_LOOKUP_READY_253');
+}
+
+function autMasterCachedLookup_(type, document) {
+  var key = autMasterLookupCacheKey_(type, document);
+  if (!key) return null;
+  return autJsonParse_(CacheService.getScriptCache().get(key), null);
+}
+
+function autMasterStoreLookup_(type, document, result) {
+  var key = autMasterLookupCacheKey_(type, document);
+  if (!key) return result;
+  autCachePut_(CacheService.getScriptCache(), key, result, 300);
+  return result;
+}
+
+function autMasterPrimeLookupCache_() {
+  var cache = CacheService.getScriptCache();
+  if (cache.get('AUT_MASTER_LOOKUP_READY_253')) return true;
+  autRows_('BASE_CLIENTES').filter(autMasterActiveClient_).forEach(function(row) {
+    var type = String(row.TIPO_PESSOA || 'PF').toUpperCase();
+    var document = autMasterCanonicalDocument_(type, row.CPF_CNPJ);
+    if (!autMasterDocumentValid_(type, document)) return;
+    autMasterStoreLookup_(type, document, { found: true, item: autMasterClientPublic_(row, true) });
+  });
+  cache.put('AUT_MASTER_LOOKUP_READY_253', '1', 300);
+  return true;
+}
+
 function apiPesquisarBaseClientes(token, filters) {
   try {
     var actor = autRequireAuth_(token, 'BASE_CLIENTES_VER');
@@ -1411,11 +1456,25 @@ function apiBuscarCadastroPorDocumento(token, document, context) {
     autAssert_(autHasPermission_(actor, 'PROCESSO_CRIAR') || autHasPermission_(actor, 'PROCESSO_EDITAR'), 'Você não pode usar o preenchimento cadastral.', 'FORBIDDEN');
     var digits = autMasterCanonicalDocument_('', document);
     autAssert_(autCpfValido_(digits) || autValidateCnpj_(digits), 'CPF/CNPJ inválido.', 'INVALID_DOCUMENT');
-    var rows = autMasterRowsByDocument_(digits, autCpfValido_(digits) ? 'PF' : 'PJ');
+    var type = autCpfValido_(digits) ? 'PF' : 'PJ';
+    var cached = autMasterCachedLookup_(type, digits);
+    if (cached) {
+      if (cached.found && cached.item) {
+        var cachedAuditKey = 'AUT_MASTER_LOOKUP_AUDIT_253_' + autHash_(String(actor._sessionId || actor.ID_USUARIO) + '|' + digits);
+        if (!CacheService.getScriptCache().get(cachedAuditKey)) {
+          autAudit_(actor, 'BASE_CLIENTE_CONSULTADA_AUTOPREENCHIMENTO', 'BASE_CLIENTE', cached.item.id, { documentoHash: autHash_(digits), cache: true }, context);
+          CacheService.getScriptCache().put(cachedAuditKey, '1', 600);
+        }
+      }
+      return autResult_(cached);
+    }
+    var rows = autMasterRowsByDocument_(digits, type);
     autAssert_(rows.length <= 1, 'Há cadastros duplicados para este CPF/CNPJ. O autopreenchimento foi bloqueado.', 'BASE_DUPLICATE_DETECTED');
-    if (!rows.length) return autResult_({ found: false });
-    autAudit_(actor, 'BASE_CLIENTE_CONSULTADA_AUTOPREENCHIMENTO', 'BASE_CLIENTE', rows[0].ID_CADASTRO, { documentoHash: autHash_(digits) }, context);
-    return autResult_({ found: true, item: autMasterClientPublic_(rows[0], true) });
+    if (!rows.length) return autResult_(autMasterStoreLookup_(type, digits, { found: false }));
+    var result = autMasterStoreLookup_(type, digits, { found: true, item: autMasterClientPublic_(rows[0], true) });
+    autAudit_(actor, 'BASE_CLIENTE_CONSULTADA_AUTOPREENCHIMENTO', 'BASE_CLIENTE', rows[0].ID_CADASTRO, { documentoHash: autHash_(digits), cache: false }, context);
+    CacheService.getScriptCache().put('AUT_MASTER_LOOKUP_AUDIT_253_' + autHash_(String(actor._sessionId || actor.ID_USUARIO) + '|' + digits), '1', 600);
+    return autResult_(result);
   } catch (err) { return autPublicError_(err); }
 }
 

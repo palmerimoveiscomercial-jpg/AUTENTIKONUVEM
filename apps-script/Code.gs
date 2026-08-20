@@ -120,6 +120,10 @@ function apiPublicBootstrap() {
 function apiBootstrap(token) {
   try {
     var user = autRequireAuth_(token);
+    if (autHasPermission_(user, 'PROCESSO_CRIAR') || autHasPermission_(user, 'PROCESSO_EDITAR')) {
+      try { autMasterPrimeLookupCache_(); }
+      catch (lookupWarmError) { console.warn('Pré-aquecimento do autopreenchimento ignorado: ' + lookupWarmError.message); }
+    }
     return autResult_({
       user: autUserPublic_(user),
       config: autPublicConfig_(),
