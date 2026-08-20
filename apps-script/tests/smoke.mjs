@@ -236,9 +236,24 @@ class FileMock {
 
 let nextFolderId = 1;
 class FolderMock {
-  constructor(name) { this.id = `folder-${nextFolderId++}`; this.name = name; this.folders = []; this.files = []; }
+  constructor(name, options = {}) {
+    this.id = `folder-${nextFolderId++}`;
+    this.name = name;
+    this.folders = [];
+    this.files = [];
+    this.trashed = false;
+    this.sharingAccess = options.sharingAccess ?? 'PRIVATE';
+    this.sharingPermission = options.sharingPermission ?? 'NONE';
+    this.ownerEmail = options.ownerEmail ?? 'palmer.imoveis.comercial@gmail.com';
+    this.shareableByEditors = true;
+  }
   getId() { return this.id; }
   getUrl() { return `https://drive.google.com/drive/folders/${this.id}`; }
+  getSharingAccess() { return this.sharingAccess; }
+  getSharingPermission() { return this.sharingPermission; }
+  getOwner() { return { getEmail: () => this.ownerEmail }; }
+  setShareableByEditors(value) { this.shareableByEditors = Boolean(value); return this; }
+  setTrashed(value) { this.trashed = Boolean(value); return this; }
   createFolder(name) { const folder = new FolderMock(String(name)); this.folders.push(folder); folders.set(folder.id, folder); return folder; }
   getFoldersByName(name) {
     const found = this.folders.filter((folder) => folder.name === String(name));
@@ -261,6 +276,10 @@ const triggers = [];
 const folders = new Map();
 const files = new Map();
 const sentEmails = [];
+const drivePermissions = new Map();
+const failedDrivePermissionDeletes = new Set();
+const drivePermissionListCalls = [];
+let legacyPublicRootId = '';
 
 const uiMock = {
   ButtonSet: { OK: 'OK' },
@@ -297,6 +316,7 @@ const Utilities = {
 };
 
 const ScriptApp = {
+  getOAuthToken: () => 'oauth-token-smoke',
   getProjectTriggers: () => triggers,
   newTrigger(handler) {
     const trigger = { getHandlerFunction: () => handler };
@@ -308,6 +328,18 @@ const ScriptApp = {
   }
 };
 
+const mediaHealthState = {
+  status: 200,
+  payload: {
+    ok: true,
+    data: {
+      database: false,
+      driveSyncWorker: {configured: false, healthy: false},
+      largeUploadReady: false,
+      deep: true
+    }
+  }
+};
 const context = vm.createContext({
   console,
   Buffer,
@@ -324,25 +356,65 @@ const context = vm.createContext({
   Set,
   Utilities,
   CacheService: { getScriptCache: () => cache },
-  LockService: { getScriptLock: () => lock },
+  LockService: { getScriptLock: () => lock, getUserLock: () => lock },
   SpreadsheetApp: {
     ProtectionType: { SHEET: 'SHEET' },
     openById: () => spreadsheet,
     getUi: () => uiMock,
     flush() {}
   },
-  Session: { getEffectiveUser: () => ({ getEmail: () => 'palmer.imoveis.comercial@gmail.com' }) },
+  Session: {
+    getEffectiveUser: () => ({ getEmail: () => 'palmer.imoveis.comercial@gmail.com' }),
+    getActiveUser: () => ({ getEmail: () => 'palmer.imoveis.comercial@gmail.com' })
+  },
   PropertiesService: {
     getScriptProperties: () => ({
       getProperty: (key) => properties.get(String(key)) ?? null,
       setProperty: (key, value) => properties.set(String(key), String(value)),
-      deleteProperty: (key) => properties.delete(String(key))
+      deleteProperty: (key) => properties.delete(String(key)),
+      getProperties: () => Object.fromEntries(properties)
     })
   },
   DriveApp: {
+    Access: { PRIVATE: 'PRIVATE' },
     createFolder(name) { const folder = new FolderMock(String(name)); folders.set(folder.id, folder); return folder; },
     getFolderById: (id) => { if (!folders.has(String(id))) throw new Error('Pasta não encontrada'); return folders.get(String(id)); },
     getFileById: (id) => { if (!files.has(String(id))) throw new Error('Arquivo não encontrado'); return files.get(String(id)); }
+  },
+  UrlFetchApp: {
+    fetch(url, options = {}) {
+      const parsed = new URL(String(url));
+      if (parsed.pathname.endsWith('/api/health')) {
+        return {
+          getResponseCode: () => mediaHealthState.status,
+          getContentText: () => JSON.stringify(mediaHealthState.payload)
+        };
+      }
+      const match = parsed.pathname.match(/^\/drive\/v3\/files\/([^/]+)\/permissions(?:\/([^/]+))?$/);
+      if (!match) {
+        return { getResponseCode: () => 404, getContentText: () => JSON.stringify({ error: 'not-found' }) };
+      }
+      const fileId = decodeURIComponent(match[1]);
+      const permissionId = match[2] ? decodeURIComponent(match[2]) : '';
+      const method = String(options.method || 'get').toLowerCase();
+      if (method === 'get') {
+        drivePermissionListCalls.push(fileId);
+        const permissions = (drivePermissions.get(fileId) || []).map((permission) => ({ ...permission }));
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ permissions }) };
+      }
+      if (method === 'delete') {
+        if (failedDrivePermissionDeletes.has(permissionId)) {
+          return { getResponseCode: () => 500, getContentText: () => JSON.stringify({ error: 'forced-delete-failure' }) };
+        }
+        const permissions = drivePermissions.get(fileId) || [];
+        const index = permissions.findIndex((permission) => permission.id === permissionId);
+        if (index < 0) return { getResponseCode: () => 404, getContentText: () => '' };
+        permissions.splice(index, 1);
+        drivePermissions.set(fileId, permissions);
+        return { getResponseCode: () => 204, getContentText: () => '' };
+      }
+      return { getResponseCode: () => 405, getContentText: () => '' };
+    }
   },
   ScriptApp,
   MailApp: {
@@ -388,7 +460,48 @@ check('instalação completa', () => {
   assert.equal(context.autConfigMap_().MEDIA_CLOUD_ENABLED, false);
   assert.equal(context.autConfigMap_().MEDIA_MAX_UPLOAD_MB, 25);
   assert.equal(context.autConfigMap_().MEDIA_MAX_PDF_SOURCE_MB, 100);
+  assert.equal(context.autConfigMap_().MEDIA_LARGE_UPLOAD_ENABLED, false);
+  assert.equal(context.autConfigMap_().MEDIA_DRIVE_SYNC_WORKER_READY, false);
   assert.equal(context.autConfigMap_().ADOBE_ENABLED, false);
+});
+
+check('raiz documental privada rotaciona referências sem perder o histórico', () => {
+  const installedRootId = properties.get('AUT_DOCUMENTS_FOLDER_ID');
+  const installedRoot = folders.get(installedRootId);
+  assert.equal(installedRoot.getSharingAccess(), 'PRIVATE');
+  assert.equal(installedRoot.getOwner().getEmail(), 'palmer.imoveis.comercial@gmail.com');
+  assert.equal(installedRoot.shareableByEditors, false);
+
+  const legacyRoot = new FolderMock('Documentos legados', { sharingAccess: 'ANYONE_WITH_LINK' });
+  legacyPublicRootId = legacyRoot.id;
+  const legacyProcessFolder = new FolderMock('PROTOCOLO-LEGADO', { sharingAccess: 'ANYONE_WITH_LINK' });
+  folders.set(legacyRoot.id, legacyRoot);
+  folders.set(legacyProcessFolder.id, legacyProcessFolder);
+  const processFolderKey = 'AUT_PROCESS_FOLDER_TESTE_SEGURANCA';
+  properties.set('AUT_DOCUMENTS_FOLDER_ID', legacyRoot.id);
+  properties.set('AUT_PROCESS_FOLDERS_ROOT_ID', legacyRoot.id);
+  properties.set(processFolderKey, legacyProcessFolder.id);
+
+  const repaired = context.repararArmazenamentoDriveSetup();
+  assert.equal(repaired.ok, true);
+  assert.equal(repaired.private, true);
+  assert.equal(repaired.ownedByDeployingAccount, true);
+  assert.notEqual(repaired.folderId, legacyRoot.id);
+  assert.equal(properties.has(processFolderKey), false, 'a subpasta antiga não pode receber uploads novos');
+  assert.ok(context.autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').includes(legacyRoot.id));
+  assert.ok(context.autFolderHistoryIds_(processFolderKey).includes(legacyProcessFolder.id));
+
+  const foreignRoot = new FolderMock('Privada de outra conta', {
+    sharingAccess: 'PRIVATE', ownerEmail: 'outra-conta@example.com'
+  });
+  folders.set(foreignRoot.id, foreignRoot);
+  properties.set('AUT_DOCUMENTS_FOLDER_ID', foreignRoot.id);
+  properties.set('AUT_PROCESS_FOLDERS_ROOT_ID', foreignRoot.id);
+  const repairedOwner = context.repararArmazenamentoDriveSetup();
+  assert.equal(repairedOwner.ok, true);
+  assert.notEqual(repairedOwner.folderId, foreignRoot.id);
+  assert.equal(repairedOwner.ownerEmail, 'palmer.imoveis.comercial@gmail.com');
+  assert.ok(context.autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').includes(foreignRoot.id));
 });
 
 check('683 campos organizados e 14 tipos de formulário', () => {
@@ -411,7 +524,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, 683);
-  assert.equal(diagnostic.codeVersion, '2.5.1');
+  assert.equal(diagnostic.codeVersion, '2.5.2');
   assert.ok(diagnostic.maxFormCacheBytes < 15_000);
 });
 
@@ -517,6 +630,25 @@ check('Carta de Clientes deduplica CPF, permite busca e edição autorizada', ()
   assert.equal(refreshed.income, 9000);
   assert.equal(refreshed.address.city, 'Belém');
   assert.equal(context.autRowsBy_('BASE_CLIENTES', 'CPF_CNPJ', '52998224725').length, 1);
+});
+
+check('Carta de Clientes serializa data nativa do Sheets sem criar conflito falso', () => {
+  const client = context.autMasterRowsByDocument_('52998224725', 'PF')[0];
+  const nativeDate = new Date('2026-01-15T12:00:00Z');
+  context.autUpdateRow_('BASE_CLIENTES', client._row, { DATA_NASCIMENTO_ABERTURA: nativeDate });
+  assert.equal(context.autMasterDateOnly_(nativeDate), '2026-01-15');
+  assert.equal(context.autMasterDateOnly_('2026-01-15'), '2026-01-15', 'string ISO válida deve ser preservada');
+  assert.equal(context.autMasterDateOnly_('15/01/2026'), '2026-01-15');
+  assert.equal(
+    context.autMasterComparable_('DATA_NASCIMENTO_ABERTURA', nativeDate),
+    context.autMasterComparable_('DATA_NASCIMENTO_ABERTURA', '2026-01-15')
+  );
+  const before = context.autMasterOpenConflicts_(client.ID_CADASTRO).length;
+  assert.equal(context.autMasterConflict_(client, 'DATA_NASCIMENTO_ABERTURA', nativeDate, '2026-01-15', null, 'TESTE_DATA'), false);
+  assert.equal(context.autMasterOpenConflicts_(client.ID_CADASTRO).length, before);
+  const lookup = data(context.apiBuscarCadastroPorDocumento(token, '529.982.247-25', { requestId: 'lookup-native-date' }));
+  assert.equal(lookup.item.birthOpening, '2026-01-15');
+  assert.equal(Object.prototype.toString.call(lookup.item.birthOpening), '[object String]');
 });
 
 check('Carta de Clientes repara zero inicial, consolida duplicata e preserva divergência real', () => {
@@ -874,6 +1006,79 @@ check('upload por formulário/Blob, prévia segura, metadados, download e limite
   assert.ok(context.autRows_('AUDITORIA').some((row) => row.ACAO === 'PDF_ACESSO_NEGADO'));
 });
 
+check('higienização Drive remove somente anyone, preserva ACL nominal e retoma após falha', () => {
+  const activeRootId = properties.get('AUT_DOCUMENTS_FOLDER_ID');
+  const documentFileIds = context.autRows_('PROCESSO_DOCUMENTOS')
+    .map((row) => String(row.ARQUIVO_ID || ''))
+    .filter((id, index, all) => id && all.indexOf(id) === index);
+  assert.ok(legacyPublicRootId);
+  assert.ok(documentFileIds.length >= 3);
+
+  drivePermissions.set(activeRootId, [
+    { id: 'perm-active-private-sentinel', type: 'anyone', role: 'reader' }
+  ]);
+  drivePermissions.set(legacyPublicRootId, [
+    { id: 'perm-root-anyone', type: 'anyone', role: 'writer' },
+    { id: 'perm-root-owner', type: 'user', role: 'owner' }
+  ]);
+  drivePermissions.set(documentFileIds[0], [
+    { id: 'perm-file-anyone', type: 'anyone', role: 'reader' },
+    { id: 'perm-file-user', type: 'user', role: 'writer' },
+    { id: 'perm-file-domain', type: 'domain', role: 'reader' }
+  ]);
+  drivePermissions.set(documentFileIds[1], [
+    { id: 'perm-file-failing-anyone', type: 'anyone', role: 'reader' },
+    { id: 'perm-file-group', type: 'group', role: 'reader' }
+  ]);
+  drivePermissions.set(documentFileIds[2], [
+    { id: 'perm-file-after-failure', type: 'anyone', role: 'reader' }
+  ]);
+  failedDrivePermissionDeletes.add('perm-file-failing-anyone');
+
+  const diagnostic = context.diagnosticarPermissoesPublicasDriveSetup(30);
+  assert.equal(diagnostic.mode, 'READ_ONLY');
+  assert.ok(diagnostic.stats.publicPermissionsFound >= 4);
+  assert.ok(drivePermissions.get(legacyPublicRootId).some((permission) => permission.type === 'anyone'));
+
+  let firstRun;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    firstRun = context.higienizarPermissoesPublicasDriveSetup(2);
+    if (firstRun.complete) break;
+  }
+  assert.equal(firstRun.complete, true);
+  assert.equal(firstRun.ok, false, 'a falha individual precisa constar no resultado sem abortar o lote');
+  assert.ok(firstRun.stats.targetsWithFailures >= 1);
+  assert.equal(properties.has('AUT_DRIVE_PUBLIC_ACL_CLEANUP_V1'), false);
+
+  assert.equal(drivePermissions.get(legacyPublicRootId).some((permission) => permission.type === 'anyone'), false);
+  assert.deepEqual(drivePermissions.get(legacyPublicRootId).map((permission) => permission.type), ['user']);
+  assert.equal(drivePermissions.get(documentFileIds[0]).some((permission) => permission.type === 'anyone'), false);
+  assert.deepEqual(drivePermissions.get(documentFileIds[0]).map((permission) => permission.type).sort(), ['domain', 'user']);
+  assert.equal(drivePermissions.get(documentFileIds[1]).some((permission) => permission.type === 'anyone'), true);
+  assert.equal(drivePermissions.get(documentFileIds[1]).some((permission) => permission.type === 'group'), true);
+  assert.equal(drivePermissions.get(documentFileIds[2]).some((permission) => permission.type === 'anyone'), false,
+    'uma falha anterior não pode impedir os itens seguintes');
+
+  // A raiz ativa confirmada como privada não recebe sequer chamada de listagem
+  // da API: sua permissão sentinela comprova que nenhuma alteração foi tentada.
+  assert.equal(drivePermissionListCalls.includes(activeRootId), false);
+  assert.equal(drivePermissions.get(activeRootId)[0].id, 'perm-active-private-sentinel');
+
+  failedDrivePermissionDeletes.delete('perm-file-failing-anyone');
+  let retryRun;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    retryRun = context.higienizarPermissoesPublicasDriveSetup(3);
+    if (retryRun.complete) break;
+  }
+  assert.equal(retryRun.complete, true);
+  assert.equal(retryRun.ok, true);
+  assert.equal(drivePermissions.get(documentFileIds[1]).some((permission) => permission.type === 'anyone'), false);
+  assert.deepEqual(drivePermissions.get(documentFileIds[1]).map((permission) => permission.type), ['group']);
+  assert.ok(context.autRows_('AUDITORIA').some((row) =>
+    row.ACAO === 'DRIVE_PERMISSOES_PUBLICAS_HIGIENIZADAS' && row.ID_ENTIDADE === 'DRIVE_ACL'
+  ));
+});
+
 check('reserva de upload na nuvem pode ser retomada sem duplicar e não conta como documento enviado', () => {
   const cloudFlag = context.autFind_('CONFIGURACOES', 'CHAVE', 'MEDIA_CLOUD_ENABLED');
   context.autUpdateRow_('CONFIGURACOES', cloudFlag._row, { VALOR: 'SIM' });
@@ -910,6 +1115,76 @@ check('reserva de upload na nuvem pode ser retomada sem duplicar e não conta co
     requestId: 'remove-pending-cloud-smoke'
   }));
   context.autUpdateRow_('CONFIGURACOES', cloudFlag._row, { VALOR: 'NAO' });
+  context.autInvalidateCaches_();
+});
+
+check('upload acima de 6 MB falha fechado até worker Drive e health profundo estarem saudáveis', () => {
+  const cloudFlag = context.autFind_('CONFIGURACOES', 'CHAVE', 'MEDIA_CLOUD_ENABLED');
+  const largeFlag = context.autFind_('CONFIGURACOES', 'CHAVE', 'MEDIA_LARGE_UPLOAD_ENABLED');
+  const workerFlag = context.autFind_('CONFIGURACOES', 'CHAVE', 'MEDIA_DRIVE_SYNC_WORKER_READY');
+  context.autUpdateRow_('CONFIGURACOES', cloudFlag._row, {VALOR:'SIM'});
+  properties.set('AUT_MEDIA_SIGNING_SECRET', 'segredo-smoke-media-32-caracteres-minimo');
+  context.autInvalidateCaches_();
+
+  const basePayload = {
+    processId,
+    typeId:'DOC_COMPROVANTE_ENDERECO',
+    fileName:'pdf-pesado-seguro.pdf',
+    mimeType:'application/pdf',
+    size:7 * 1024 * 1024,
+    sha256:'b'.repeat(64),
+    expectedVersion:context.autProcessVersion_(context.autFind_('PROCESSOS', 'ID_PROCESSO', processId)),
+    requestId:'large-upload-disabled-flags',
+    context:{requestId:'large-upload-disabled-flags'}
+  };
+  const before = context.autRows_('PROCESSO_DOCUMENTOS').length;
+  const flagsDisabled = context.apiReservarUploadNuvem(token, basePayload);
+  assert.equal(flagsDisabled.ok, false);
+  assert.equal(flagsDisabled.code, 'LARGE_UPLOAD_SAFETY_HOLD');
+  assert.equal(context.autRows_('PROCESSO_DOCUMENTOS').length, before,
+    'a contenção deve ocorrer antes de criar linha ou ticket');
+
+  context.autUpdateRow_('CONFIGURACOES', largeFlag._row, {VALOR:'SIM'});
+  context.autUpdateRow_('CONFIGURACOES', workerFlag._row, {VALOR:'SIM'});
+  context.autInvalidateCaches_();
+  mediaHealthState.payload.data.database = false;
+  mediaHealthState.payload.data.driveSyncWorker = {configured:true, healthy:false};
+  const unhealthy = data(context.apiVerificarProntidaoUploadGrande(token, true));
+  assert.equal(unhealthy.ready, false);
+  const healthBlocked = context.apiReservarUploadNuvem(token, {
+    ...basePayload,
+    requestId:'large-upload-worker-unhealthy',
+    context:{requestId:'large-upload-worker-unhealthy'}
+  });
+  assert.equal(healthBlocked.ok, false);
+  assert.equal(healthBlocked.code, 'LARGE_UPLOAD_SAFETY_HOLD');
+  assert.equal(context.autRows_('PROCESSO_DOCUMENTOS').length, before);
+
+  mediaHealthState.payload.data.database = true;
+  mediaHealthState.payload.data.driveSyncWorker = {configured:true, healthy:true};
+  const healthy = data(context.apiVerificarProntidaoUploadGrande(token, true));
+  assert.equal(healthy.ready, true);
+  const reserved = data(context.apiReservarUploadNuvem(token, {
+    ...basePayload,
+    expectedVersion:context.autProcessVersion_(context.autFind_('PROCESSOS', 'ID_PROCESSO', processId)),
+    requestId:'large-upload-worker-healthy',
+    context:{requestId:'large-upload-worker-healthy'}
+  }));
+  const pending = context.autFind_('PROCESSO_DOCUMENTOS', 'ID_DOCUMENTO', reserved.documentId);
+  assert.equal(pending.MEDIA_STATUS, 'UPLOAD_PENDING');
+  assert.equal(pending.SYNC_DRIVE_SUPABASE, 'PENDENTE');
+  assert.equal(pending.ARQUIVO_ID, '', 'reserva Supabase não pode fingir que já existe backup no Drive');
+  data(context.apiExcluirDocumento(token, reserved.documentId, {
+    expectedVersion:context.autProcessVersion_(context.autFind_('PROCESSOS', 'ID_PROCESSO', processId)),
+    requestId:'remove-large-upload-smoke'
+  }));
+
+  context.autUpdateRow_('CONFIGURACOES', largeFlag._row, {VALOR:'NAO'});
+  context.autUpdateRow_('CONFIGURACOES', workerFlag._row, {VALOR:'NAO'});
+  context.autUpdateRow_('CONFIGURACOES', cloudFlag._row, {VALOR:'NAO'});
+  mediaHealthState.payload.data.database = false;
+  mediaHealthState.payload.data.driveSyncWorker = {configured:false, healthy:false};
+  cache.remove('AUT_MEDIA_LARGE_UPLOAD_HEALTH_V1');
   context.autInvalidateCaches_();
 });
 

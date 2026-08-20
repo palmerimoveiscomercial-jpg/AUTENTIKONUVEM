@@ -358,7 +358,18 @@ Deno.serve(async request => {
     const path = url.pathname.includes(base) ? url.pathname.slice(url.pathname.indexOf(base) + base.length) || '/' : url.pathname;
     if (request.method === 'GET' && (path === '/api/health' || path === '/health')) {
       const { error } = await db().from('audit_integrity_status').select('*').limit(1);
-      return response(request, { ok: true, data: { service: 'autentiko-media-api', version: '2.4.0', database: !error, region: Deno.env.get('SB_REGION') || 'managed' } });
+      const workerConfigured = String(Deno.env.get('AUT_DRIVE_SYNC_WORKER_ENABLED') || '').toLowerCase() === 'true';
+      const databaseReady = !error;
+      return response(request, { ok: true, data: {
+        service: 'autentiko-media-api', version: '2.4.0', database: databaseReady,
+        region: Deno.env.get('SB_REGION') || 'managed',
+        driveSyncWorker: {
+          configured: workerConfigured,
+          healthy: workerConfigured && databaseReady
+        },
+        largeUploadReady: workerConfigured && databaseReady,
+        deep: url.searchParams.get('deep') === '1'
+      } });
     }
     if (request.method === 'POST' && path === '/api/v1/media/uploads') return response(request, { ok: true, data: await uploadStart(await parseBody(request)) });
     if (request.method === 'POST' && path === '/api/v1/media/uploads/complete') return response(request, { ok: true, data: await uploadComplete(await parseBody(request)) });

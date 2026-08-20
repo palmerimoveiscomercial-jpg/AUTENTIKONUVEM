@@ -15,6 +15,9 @@ As URLs e o identificador do projeto não são credenciais. Chaves, senhas e o s
 3. Configurar somente nos Secrets do Supabase: `AUT_MEDIA_SIGNING_SECRET` e `AUT_ALLOWED_ORIGINS`. `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` são injetados pelo próprio runtime.
 4. Gravar o mesmo `AUT_MEDIA_SIGNING_SECRET` em Script Properties do Apps Script.
 5. Manter `MEDIA_CLOUD_ENABLED = NAO` até migrações, health check, upload, leitura e auditoria passarem.
+6. Manter `AUT_DRIVE_SYNC_WORKER_ENABLED=false`, `MEDIA_DRIVE_SYNC_WORKER_READY=NAO` e
+   `MEDIA_LARGE_UPLOAD_ENABLED=NAO` até o worker Supabase -> Drive estar publicado e validado.
+   Sem esses três sinais, o backend bloqueia arquivos acima de 6 MB antes de criar qualquer registro.
 
 O segredo HMAC deve possuir no mínimo 32 caracteres aleatórios. A chave `service_role` nunca deve ir para HTML, planilha, Git ou logs.
 

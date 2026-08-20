@@ -127,13 +127,14 @@
     apiVisualizarDocumento: 90000,
     apiBaixarDocumento: 90000,
     apiReservarUploadNuvem: 30000,
+    apiVerificarProntidaoUploadGrande: 30000,
     apiCriarTicketMidia: 30000,
     apiFinalizarUploadNuvem: 30000,
     apiConsultarEstadoMidia: 30000,
     apiReprocessarMidia: 30000
   };
   const BROWSER_CACHE = Object.freeze({
-    schemaVersion: '2.5.1',
+    schemaVersion: '2.5.2',
     database: 'AUTENTIKO_BROWSER_CACHE',
     store: 'entries',
     maxBytes: 96 * 1024 * 1024,
@@ -2535,8 +2536,8 @@
     const acceptedTypes = acceptedDocumentMimeTypes(doc.mimeTypes);
     const hasPdf = acceptedTypes.includes('application/pdf');
     const hasImage = acceptedTypes.includes('image/');
-    const cloudPdfLimit = mediaCloudEnabled() && hasPdf ? cloudUploadLimitMb('application/pdf', doc.maxMb) : 0;
-    const cloudImageLimit = mediaCloudEnabled() && hasImage ? cloudUploadLimitMb('image/jpeg', doc.maxMb) : 0;
+    const cloudPdfLimit = hasPdf ? effectiveUploadLimitMb('application/pdf', doc.maxMb) : 0;
+    const cloudImageLimit = hasImage ? effectiveUploadLimitMb('image/jpeg', doc.maxMb) : 0;
     const limitText = cloudPdfLimit && cloudImageLimit
       ? `até ${esc(cloudImageLimit)} MB para imagens e ${esc(cloudPdfLimit)} MB para PDFs`
       : cloudPdfLimit
@@ -2544,8 +2545,11 @@
         : cloudImageLimit
           ? `até ${esc(cloudImageLimit)} MB por imagem`
           : `até ${esc(doc.maxMb)} MB cada`;
+    const largeUploadNotice = mediaCloudEnabled() && !mediaLargeUploadConfigured()
+      ? ' · acima de 6 MB bloqueado até a cópia automática no Drive ser validada'
+      : '';
     return `<form class="document-card" data-document-upload="${esc(doc.id)}" data-document-key="${esc(key)}" data-max-mb="${esc(doc.maxMb)}" data-mime-types="${esc(acceptedTypes)}">
-      <div class="document-card-head"><div><strong>${esc(doc.name)}</strong><small class="muted">${doc.required?'Obrigatório neste processo':'Opcional neste processo'}${groupText} · vários arquivos permitidos · ${limitText}</small></div><span class="status-badge ${statusClass}">${esc(status)}</span></div>
+      <div class="document-card-head"><div><strong>${esc(doc.name)}</strong><small class="muted">${doc.required?'Obrigatório neste processo':'Opcional neste processo'}${groupText} · vários arquivos permitidos · ${limitText}${largeUploadNotice}</small></div><span class="status-badge ${statusClass}">${esc(status)}</span></div>
       ${canUpload ? `<div class="document-dropzone" data-document-dropzone tabindex="0" role="button" aria-label="Selecionar ou arrastar ${esc(doc.name)}"><input class="document-file-input" type="file" name="file" accept="${esc(acceptedTypes)}" tabindex="-1" multiple><span class="dropzone-icon">↑</span><span><strong>Arraste quantos arquivos precisar</strong><small>ou clique para selecionar vários de uma vez · imagens são otimizadas sem reduzir a resolução</small></span></div>
       <div class="document-file-selection hidden" data-file-selection><div class="selected-files-list" data-selected-files-list></div><div class="document-selected-actions"><button type="button" class="link-btn danger" data-clear-document-file>Remover todos</button></div></div>
       <div class="document-card-actions"><span class="muted">Confira as prévias e coloque os arquivos na fila segura.</span><button type="button" class="btn primary compact" data-upload-type="${esc(doc.id)}" disabled>Enviar em segundo plano</button></div>` : '<p class="notice warning">Seu perfil pode consultar este processo, mas não possui permissão para enviar documentos.</p>'}
@@ -3214,6 +3218,7 @@
     const selected = state.pendingDocumentFiles.get(key) || [];
     const known = new Set(selected.map(item => `${item.originalName || item.file.name}|${item.originalSize || item.file.size}|${item.file.lastModified}`));
     let rejected = 0;
+    let safetyHeld = 0;
     form.classList.add('optimizing-images');
     const prepared = await prepareDocumentFiles(files);
     form.classList.remove('optimizing-images');
@@ -3222,17 +3227,22 @@
       const mimeType = String(file.type || '').toLowerCase();
       const signature = `${preparedFile.originalName}|${preparedFile.originalSize}|${file.lastModified}`;
       const isPdf = mimeType === 'application/pdf';
-      const configuredLimitMb = mediaCloudEnabled()
+      const configuredLimitMb = mediaLargeUploadConfigured()
         ? cloudUploadLimitMb(mimeType, maxMb)
         : isPdf
-          ? Math.min(maxMb || Number.POSITIVE_INFINITY, Number(state.bootstrap?.config?.MAX_PDF_SIZE_MB || maxMb || 0))
-          : maxMb;
+          ? Math.min(maxMb || 6, Number(state.bootstrap?.config?.MAX_PDF_SIZE_MB || 6), 6)
+          : Math.min(maxMb || 6, 6);
       const effectiveMaxBytes = configuredLimitMb ? configuredLimitMb * 1024 * 1024 : maxBytes;
       const invalidPdf = isPdf && (
         !/\.pdf$/i.test(String(file.name || '')) ||
         String(file.name || '').length > 200 ||
         !(await hasPdfSignature(file))
       );
+      if (file.size > 6 * 1024 * 1024 && mediaCloudEnabled() && !mediaLargeUploadConfigured()) {
+        rejected += 1;
+        safetyHeld += 1;
+        continue;
+      }
       if (!file.size || invalidPdf || (allowed.length && !allowed.includes(mimeType)) ||
           (effectiveMaxBytes && file.size > effectiveMaxBytes) || known.has(signature)) {
         rejected += 1;
@@ -3251,15 +3261,18 @@
         savedPercent:preparedFile.savedPercent,
         width:preparedFile.width,
         height:preparedFile.height,
-        requiresOptimization:isPdf && mediaCloudEnabled() && file.size > 25 * 1024 * 1024
+        requiresOptimization:isPdf && mediaLargeUploadConfigured() && file.size > 25 * 1024 * 1024
       });
     }
-    if (!selected.length) return toast('Nenhum arquivo válido foi selecionado. O PDF precisa ter extensão .pdf, MIME correto, assinatura válida e respeitar o limite.', 'error');
+    if (!selected.length) return toast(safetyHeld
+      ? 'Uploads acima de 6 MB estão temporariamente bloqueados até a cópia automática no Google Drive ser validada. Nenhum arquivo foi alterado.'
+      : 'Nenhum arquivo válido foi selecionado. O PDF precisa ter extensão .pdf, MIME correto, assinatura válida e respeitar o limite.', 'error');
     state.pendingDocumentFiles.set(key, selected);
     const input = formControl(form, 'file');
     if (input) input.value = '';
     renderSelectedDocumentFiles(form);
-    if (rejected) toast(`${rejected} arquivo(s) ignorado(s) por formato, tamanho ou duplicidade.`, 'error');
+    if (safetyHeld) toast(`${safetyHeld} arquivo(s) acima de 6 MB não foram enviados: a cópia automática no Google Drive ainda não está validada.`, 'error');
+    else if (rejected) toast(`${rejected} arquivo(s) ignorado(s) por formato, tamanho ou duplicidade.`, 'error');
     else if (fromDrop || files.length > 1) toast(`${prepared.length} arquivo(s) adicionados para conferência.`, 'success');
   }
 
@@ -3829,6 +3842,21 @@
     return configured === true || ['SIM','TRUE'].includes(String(configured || '').toUpperCase());
   }
 
+  function mediaLargeUploadConfigured() {
+    const config = state.bootstrap?.config || {};
+    const enabled = config.MEDIA_LARGE_UPLOAD_ENABLED === true ||
+      ['SIM','TRUE'].includes(String(config.MEDIA_LARGE_UPLOAD_ENABLED || '').toUpperCase());
+    const workerReady = config.MEDIA_DRIVE_SYNC_WORKER_READY === true ||
+      ['SIM','TRUE'].includes(String(config.MEDIA_DRIVE_SYNC_WORKER_READY || '').toUpperCase());
+    return mediaCloudEnabled() && enabled && workerReady;
+  }
+
+  function effectiveUploadLimitMb(mimeType, catalogLimitMb = 0) {
+    if (mediaLargeUploadConfigured()) return cloudUploadLimitMb(mimeType, catalogLimitMb);
+    const catalog = Number(catalogLimitMb || 6);
+    return Math.min(Number.isFinite(catalog) && catalog > 0 ? catalog : 6, 6);
+  }
+
   function cloudUploadLimitMb(mimeType, catalogLimitMb = 0) {
     const isPdf = String(mimeType || '').toLowerCase() === 'application/pdf';
     const configured = isPdf
@@ -4126,7 +4154,7 @@
       : failed
         ? `${failed} com falha · ${complete} concluído(s)`
         : warnings
-          ? `${complete} concluído(s) · ${warnings} cópia(s) rápida(s) pendente(s)`
+          ? `${complete} armazenado(s) · ${warnings} redundância(s) pendente(s)`
           : `${complete} concluído(s)`;
     $('#upload-queue-items').innerHTML = jobs.map(job => {
       const message = job.status === 'queued'
@@ -4140,7 +4168,7 @@
       const trailing = job.status === 'uploading'
         ? '<span class="mini-spinner"></span>'
         : job.status === 'complete'
-          ? `<b title="${job.warning ? 'Salvo no Drive; sincronização rápida pendente' : 'Envio concluído'}">${job.warning ? '!' : '✓'}</b>`
+          ? `<b title="${job.protectionPending ? 'Original no Supabase; cópia de segurança no Drive pendente' : job.warning ? 'Original no Drive; réplica rápida pendente' : 'Envio e redundância concluídos'}">${job.warning ? '!' : '✓'}</b>`
           : job.status === 'failed'
             ? `<button type="button" class="link-btn" data-retry-upload-job="${esc(job.id)}">Tentar novamente</button>`
             : '';
@@ -4179,6 +4207,7 @@
     job.error = '';
     job.warning = '';
     job.syncMessage = '';
+    job.protectionPending = false;
     job.attempt = Number(job.attempt || 0) + 1;
     job.attemptRequestId = `${job.id}:a${job.attempt}:${requestId()}`;
     renderUploadQueue();
@@ -4213,10 +4242,23 @@
           }
         }
       } else if (mediaCloudEnabled()) {
+        if (!mediaLargeUploadConfigured()) {
+          throw new Error('Uploads acima de 6 MB estão temporariamente bloqueados até a cópia automática no Google Drive ser validada. Nenhum arquivo foi alterado.');
+        }
+        const readiness = await api('apiVerificarProntidaoUploadGrande', state.token, true);
+        if (!readiness?.ready) {
+          const hold = new Error(readiness?.message || 'A cópia automática no Google Drive ainda não está saudável. Nenhum arquivo foi alterado.');
+          hold.code = readiness?.code || 'LARGE_UPLOAD_SAFETY_HOLD';
+          throw hold;
+        }
         result = await runCloudUploadJob(job, {requestId:`${job.attemptRequestId}:cloud`});
-        job.syncMessage = result?.finalization?.driveSyncPending
-          ? 'Nuvem concluída. A cópia de segurança no Google Drive está em processamento.'
-          : 'Documento sincronizado na nuvem e no Google Drive.';
+        job.protectionPending = Boolean(result?.finalization?.driveSyncPending);
+        if (job.protectionPending) {
+          job.warning = 'Original armazenado no Supabase. A cópia de segurança no Google Drive ainda está pendente; a redundância não foi concluída.';
+          job.syncMessage = job.warning;
+        } else {
+          job.syncMessage = 'Documento sincronizado no Supabase e no Google Drive.';
+        }
       } else {
         throw new Error('Arquivos acima de 6 MB exigem a nuvem documental ativa. O arquivo não foi alterado.');
       }

@@ -118,6 +118,8 @@ function autSeedConfigurations_() {
     ['MEDIA_API_BASE_URL', 'https://kgcucxqtzqcsskhjfmzl.supabase.co/functions/v1/media-api', 'DOCUMENTOS', 'TEXT', 'URL HTTPS da API de mídia validada pelo AUTENTIKO', 'SIM'],
     ['MEDIA_MAX_UPLOAD_MB', '25', 'DOCUMENTOS', 'NUMBER', 'Tamanho máximo de novos uploads diretos na nuvem, em MB', 'SIM'],
     ['MEDIA_MAX_PDF_SOURCE_MB', '100', 'DOCUMENTOS', 'NUMBER', 'Limite de entrada para PDF pesado; acima de 25 MB será otimizado em segundo plano', 'SIM'],
+    ['MEDIA_LARGE_UPLOAD_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Libera arquivos acima de 6 MB somente após a redundância Drive estar operacional', 'SIM'],
+    ['MEDIA_DRIVE_SYNC_WORKER_READY', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Confirmação operacional do worker Supabase para Google Drive; manter desativado até health check profundo', 'NAO'],
     ['ADOBE_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa o processamento excepcional por Adobe PDF Services', 'SIM'],
     ['ADOBE_MONTHLY_LIMIT', '500', 'DOCUMENTOS', 'NUMBER', 'Limite mensal monitorado de transações do Adobe PDF Services', 'SIM'],
     ['AUDITORIA_RETENCAO_ANOS', '10', 'AUDITORIA', 'NUMBER', 'Retenção inicial dos registros finalizados e de auditoria', 'SIM'],
@@ -560,25 +562,79 @@ function autProbeFolderWrite_(folder) {
   }
 }
 
+function autFolderSecurity_(folder) {
+  var access = '';
+  var permission = '';
+  var ownerEmail = '';
+  try { access = String(folder.getSharingAccess() || ''); } catch (ignoreAccess) {}
+  try { permission = String(folder.getSharingPermission() || ''); } catch (ignorePermission) {}
+  try { ownerEmail = String(folder.getOwner().getEmail() || '').trim().toLowerCase(); } catch (ignoreOwner) {}
+  var effectiveEmail = String(Session.getEffectiveUser().getEmail() || '').trim().toLowerCase();
+  return {
+    access: access,
+    permission: permission,
+    ownerEmail: ownerEmail,
+    effectiveEmail: effectiveEmail,
+    private: access === String(DriveApp.Access.PRIVATE),
+    // Falha fechada: se o Apps Script não conseguir confirmar ambos os
+    // endereços, a pasta não pode ser promovida a raiz documental ativa.
+    ownedByEffectiveUser: Boolean(effectiveEmail && ownerEmail && ownerEmail === effectiveEmail)
+  };
+}
+
+function autIsSecureDocumentsRoot_(folder) {
+  var security = autFolderSecurity_(folder);
+  return security.private && security.ownedByEffectiveUser;
+}
+
 function autCreateDocumentsRootFolder_() {
   var timeZone = AUTENTIKO.TIMEZONE || 'America/Sao_Paulo';
   var suffix = Utilities.formatDate(new Date(), timeZone, 'yyyyMMdd-HHmmss');
-  return DriveApp.createFolder('AUTENTIKO OK NUVEM - Documentos - ' + suffix);
+  var folder = DriveApp.createFolder('AUTENTIKO OK NUVEM - Documentos Privados - ' + suffix);
+  // A pasta deve nascer privada. O AUTENTIKO entrega os bytes somente depois
+  // de validar sessão e permissão; não depende de compartilhamento público.
+  try { folder.setShareableByEditors(false); } catch (ignoreEditors) {}
+  if (!autIsSecureDocumentsRoot_(folder)) {
+    try { folder.setTrashed(true); } catch (ignoreTrash) {}
+    throw new Error('A nova pasta documental não pôde ser confirmada como privada e pertencente à conta da implantação.');
+  }
+  return folder;
+}
+
+function autAlignProcessFolderReferencesWithRoot_(rootFolderId) {
+  rootFolderId = String(rootFolderId || '').trim();
+  autAssert_(rootFolderId, 'A raiz documental ativa não foi informada.');
+  var props = PropertiesService.getScriptProperties();
+  var bindingKey = 'AUT_PROCESS_FOLDERS_ROOT_ID';
+  var boundRootId = String(props.getProperty(bindingKey) || '').trim();
+  if (boundRootId === rootFolderId) return;
+
+  // Uma raiz nova não pode reutilizar subpastas de processos da raiz anterior.
+  // Os IDs antigos continuam no histórico e permanecem disponíveis para
+  // localizar/visualizar documentos legados, sem mover ou excluir arquivos.
+  var allProperties = props.getProperties();
+  Object.keys(allProperties).forEach(function(propertyKey) {
+    if (propertyKey.indexOf('AUT_PROCESS_FOLDER_') !== 0) return;
+    if (propertyKey.indexOf('_PREVIOUS_IDS') >= 0) return;
+    var folderId = String(allProperties[propertyKey] || '').trim();
+    if (folderId) autRememberPreviousFolderId_(propertyKey, folderId);
+    props.deleteProperty(propertyKey);
+  });
+  props.setProperty(bindingKey, rootFolderId);
+}
+
+function autActivateDocumentsRoot_(folder) {
+  var props = PropertiesService.getScriptProperties();
+  var folderId = String(folder && folder.getId() || '').trim();
+  autAssert_(folderId && autIsSecureDocumentsRoot_(folder),
+    'A raiz documental somente pode ser ativada quando for privada e pertencer à conta efetiva.');
+  props.setProperty('AUT_DOCUMENTS_FOLDER_ID', folderId);
+  autAlignProcessFolderReferencesWithRoot_(folderId);
+  return folder;
 }
 
 function autEnsureRootFolder_() {
-  var props = PropertiesService.getScriptProperties();
-  var id = String(props.getProperty('AUT_DOCUMENTS_FOLDER_ID') || '').trim();
-  if (id) {
-    try { return DriveApp.getFolderById(id); }
-    catch (err) {
-      autRememberPreviousFolderId_('AUT_DOCUMENTS_FOLDER_ID', id);
-      console.warn('A pasta documental configurada não está acessível; a referência anterior foi preservada.');
-    }
-  }
-  var folder = autCreateDocumentsRootFolder_();
-  props.setProperty('AUT_DOCUMENTS_FOLDER_ID', folder.getId());
-  return folder;
+  return autEnsureWritableRootFolder_();
 }
 
 function autEnsureWritableRootFolder_() {
@@ -588,10 +644,11 @@ function autEnsureWritableRootFolder_() {
   if (id) {
     try { folder = DriveApp.getFolderById(id); }
     catch (err) { folder = null; }
-    if (folder) {
+    if (folder && autIsSecureDocumentsRoot_(folder)) {
       var currentProbe = autProbeFolderWrite_(folder);
-      if (currentProbe.writable) return folder;
+      if (currentProbe.writable) return autActivateDocumentsRoot_(folder);
     }
+    if (folder) console.warn('A pasta documental configurada não é privada ou não pertence à conta efetiva; ela será preservada somente no histórico.');
     autRememberPreviousFolderId_('AUT_DOCUMENTS_FOLDER_ID', id);
   }
 
@@ -600,8 +657,7 @@ function autEnsureWritableRootFolder_() {
   if (!newProbe.writable) {
     throw new Error('Não foi possível criar uma pasta gravável para os documentos do AUTENTIKO. ' + newProbe.error);
   }
-  props.setProperty('AUT_DOCUMENTS_FOLDER_ID', folder.getId());
-  return folder;
+  return autActivateDocumentsRoot_(folder);
 }
 
 function diagnosticarArmazenamentoDriveSetup() {
@@ -619,11 +675,16 @@ function diagnosticarArmazenamentoDriveSetup() {
     }
   }
   var result = {
-    ok: probe.writable,
+    ok: probe.writable && Boolean(folder) && autIsSecureDocumentsRoot_(folder),
     deployingAccount: account,
     folderId: folder ? folder.getId() : id,
     folderUrl: folder ? folder.getUrl() : '',
     writable: probe.writable,
+    private: folder ? autFolderSecurity_(folder).private : false,
+    sharingAccess: folder ? autFolderSecurity_(folder).access : '',
+    sharingPermission: folder ? autFolderSecurity_(folder).permission : '',
+    ownerEmail: folder ? autFolderSecurity_(folder).ownerEmail : '',
+    ownedByDeployingAccount: folder ? autFolderSecurity_(folder).ownedByEffectiveUser : false,
     previousFolderCount: Math.max(0, autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').length - (id ? 1 : 0)),
     error: probe.writable ? '' : probe.error
   };
@@ -638,11 +699,16 @@ function repararArmazenamentoDriveSetup() {
     var folder = autEnsureWritableRootFolder_();
     var probe = autProbeFolderWrite_(folder);
     var result = {
-      ok: probe.writable,
+      ok: probe.writable && autIsSecureDocumentsRoot_(folder),
       deployingAccount: String(Session.getEffectiveUser().getEmail() || '').trim(),
       folderId: folder.getId(),
       folderUrl: folder.getUrl(),
       writable: probe.writable,
+      private: autFolderSecurity_(folder).private,
+      sharingAccess: autFolderSecurity_(folder).access,
+      sharingPermission: autFolderSecurity_(folder).permission,
+      ownerEmail: autFolderSecurity_(folder).ownerEmail,
+      ownedByDeployingAccount: autFolderSecurity_(folder).ownedByEffectiveUser,
       previousFolderCount: Math.max(0, autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').length - 1),
       error: probe.writable ? '' : probe.error
     };
@@ -651,6 +717,366 @@ function repararArmazenamentoDriveSetup() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/*
+ * Higienização conservadora de permissões públicas do acervo documental.
+ *
+ * Regras de segurança desta rotina:
+ * - só pode ser iniciada manualmente, no editor, pela conta Palmer;
+ * - usa a API Drive v3 e remove exclusivamente permissões cujo `type` é
+ *   exatamente `anyone`;
+ * - nunca move, exclui ou altera o conteúdo de pastas/arquivos;
+ * - nunca remove permissões owner, user, group ou domain;
+ * - trabalha em lotes pequenos e salva o cursor após cada alvo;
+ * - uma falha individual é registrada e não interrompe os demais alvos.
+ */
+var AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_ = 'AUT_DRIVE_PUBLIC_ACL_CLEANUP_V1';
+var AUT_DRIVE_PUBLIC_ACL_CLEANUP_LAST_KEY_ = 'AUT_DRIVE_PUBLIC_ACL_CLEANUP_LAST_RESULT';
+var AUT_DRIVE_PUBLIC_ACL_DEFAULT_BATCH_ = 12;
+var AUT_DRIVE_PUBLIC_ACL_MAX_BATCH_ = 30;
+
+function autDriveAclOperator_() {
+  var expected = 'palmer.imoveis.comercial@gmail.com';
+  var effective = autNormalizeEmail_(Session.getEffectiveUser().getEmail() || '');
+  var active = '';
+  try { active = autNormalizeEmail_(Session.getActiveUser().getEmail() || ''); }
+  catch (ignoreActiveUser) {}
+  autAssert_(effective === expected && active === expected,
+    'Execute esta manutenção manualmente no editor do Apps Script com a conta Palmer Imóveis.',
+    'FORBIDDEN');
+  return {
+    ID_USUARIO: '',
+    NOME: expected,
+    EMAIL: expected,
+    PERFIL: 'DESENVOLVEDOR'
+  };
+}
+
+function autDriveAclLimit_(value) {
+  var limit = Math.floor(Number(value || AUT_DRIVE_PUBLIC_ACL_DEFAULT_BATCH_));
+  if (!isFinite(limit) || limit < 1) limit = AUT_DRIVE_PUBLIC_ACL_DEFAULT_BATCH_;
+  return Math.min(limit, AUT_DRIVE_PUBLIC_ACL_MAX_BATCH_);
+}
+
+function autDriveAclDocumentTargets_() {
+  var seen = {};
+  return autRows_('PROCESSO_DOCUMENTOS')
+    .sort(function(a, b) { return Number(a._row || 0) - Number(b._row || 0); })
+    .map(function(row) {
+      var fileId = String(row.ARQUIVO_ID || '').trim();
+      if (!fileId || seen[fileId]) return null;
+      seen[fileId] = true;
+      return {
+        kind: 'DOCUMENT',
+        id: fileId,
+        row: Number(row._row || 0),
+        documentId: String(row.ID_DOCUMENTO || '').trim()
+      };
+    })
+    .filter(Boolean);
+}
+
+function autDriveAclRootTargets_() {
+  var activeId = String(PropertiesService.getScriptProperties()
+    .getProperty('AUT_DOCUMENTS_FOLDER_ID') || '').trim();
+  return autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').map(function(folderId) {
+    return {
+      kind: 'FOLDER',
+      id: String(folderId || '').trim(),
+      active: String(folderId || '').trim() === activeId
+    };
+  }).filter(function(target) { return Boolean(target.id); });
+}
+
+function autDriveAclResponseError_(code) {
+  return 'DRIVE_API_HTTP_' + String(code || 'UNKNOWN');
+}
+
+function autDriveAclFetch_(url, options, acceptedCodes) {
+  var request = options || {};
+  request.muteHttpExceptions = true;
+  request.headers = request.headers || {};
+  request.headers.Authorization = 'Bearer ' + ScriptApp.getOAuthToken();
+  request.headers.Accept = 'application/json';
+  var response = UrlFetchApp.fetch(url, request);
+  var code = Number(response.getResponseCode());
+  var accepted = acceptedCodes || [200];
+  if (accepted.indexOf(code) < 0) {
+    var err = new Error(autDriveAclResponseError_(code));
+    err.code = autDriveAclResponseError_(code);
+    throw err;
+  }
+  return response;
+}
+
+function autDriveAclListPermissions_(fileId) {
+  fileId = String(fileId || '').trim();
+  autAssert_(fileId, 'Identificador do item do Drive ausente.');
+  var permissions = [];
+  var pageToken = '';
+  var pages = 0;
+  do {
+    var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) +
+      '/permissions?supportsAllDrives=true&pageSize=100&fields=' +
+      encodeURIComponent('nextPageToken,permissions(id,type,role)');
+    if (pageToken) url += '&pageToken=' + encodeURIComponent(pageToken);
+    var response = autDriveAclFetch_(url, { method: 'get' }, [200]);
+    var body = autJsonParse_(response.getContentText(), {});
+    (Array.isArray(body.permissions) ? body.permissions : []).forEach(function(permission) {
+      permissions.push({
+        id: String(permission && permission.id || '').trim(),
+        type: String(permission && permission.type || '').trim().toLowerCase(),
+        role: String(permission && permission.role || '').trim().toLowerCase()
+      });
+    });
+    pageToken = String(body.nextPageToken || '').trim();
+    pages++;
+  } while (pageToken && pages < 20);
+  return permissions;
+}
+
+function autDriveAclDeletePermission_(fileId, permissionId) {
+  var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(String(fileId)) +
+    '/permissions/' + encodeURIComponent(String(permissionId)) + '?supportsAllDrives=true';
+  // 404 é sucesso idempotente: outra execução já pode ter removido a mesma
+  // permissão entre a listagem e a exclusão.
+  var response = autDriveAclFetch_(url, { method: 'delete' }, [200, 204, 404]);
+  return Number(response.getResponseCode()) !== 404;
+}
+
+function autDriveAclFolderIsPrivate_(folderId) {
+  try {
+    var folder = DriveApp.getFolderById(String(folderId || ''));
+    return String(folder.getSharingAccess() || '') === String(DriveApp.Access.PRIVATE);
+  } catch (ignoreFolder) {
+    return false;
+  }
+}
+
+function autDriveAclInspectTarget_(target, mutate) {
+  var result = {
+    kind: target.kind,
+    id: target.id,
+    checked: true,
+    privateVerified: false,
+    anyoneFound: 0,
+    anyoneRemoved: 0,
+    anyoneAlreadyAbsent: 0,
+    nonPublicPreserved: 0,
+    failures: []
+  };
+
+  // A raiz ativa privada é apenas verificada. Nenhuma chamada de alteração é
+  // feita nela. Arquivos continuam sendo auditados individualmente, pois podem
+  // possuir uma permissão pública explícita independente da pasta.
+  if (target.kind === 'FOLDER' && autDriveAclFolderIsPrivate_(target.id)) {
+    result.privateVerified = true;
+    return result;
+  }
+
+  var permissions = autDriveAclListPermissions_(target.id);
+  var anyone = permissions.filter(function(permission) {
+    return permission.type === 'anyone' && Boolean(permission.id);
+  });
+  result.anyoneFound = anyone.length;
+  result.nonPublicPreserved = permissions.length - anyone.length;
+  if (!mutate) return result;
+
+  anyone.forEach(function(permission) {
+    try {
+      if (autDriveAclDeletePermission_(target.id, permission.id)) result.anyoneRemoved++;
+      else result.anyoneAlreadyAbsent++;
+    } catch (err) {
+      result.failures.push({
+        permissionId: permission.id,
+        code: String(err && err.code || 'DRIVE_API_ERROR').slice(0, 80)
+      });
+    }
+  });
+  return result;
+}
+
+function autDriveAclInitialStats_() {
+  return {
+    checked: 0,
+    foldersChecked: 0,
+    documentsChecked: 0,
+    privateVerified: 0,
+    publicPermissionsFound: 0,
+    publicPermissionsRemoved: 0,
+    alreadyRemoved: 0,
+    nonPublicPermissionsPreserved: 0,
+    targetsWithFailures: 0,
+    failures: []
+  };
+}
+
+function autDriveAclMergeStats_(stats, result) {
+  stats.checked++;
+  if (result.kind === 'FOLDER') stats.foldersChecked++;
+  else stats.documentsChecked++;
+  if (result.privateVerified) stats.privateVerified++;
+  stats.publicPermissionsFound += Number(result.anyoneFound || 0);
+  stats.publicPermissionsRemoved += Number(result.anyoneRemoved || 0);
+  stats.alreadyRemoved += Number(result.anyoneAlreadyAbsent || 0);
+  stats.nonPublicPermissionsPreserved += Number(result.nonPublicPreserved || 0);
+  if (result.failures && result.failures.length) {
+    stats.targetsWithFailures++;
+    result.failures.forEach(function(failure) {
+      if (stats.failures.length >= 25) return;
+      stats.failures.push({ kind: result.kind, id: result.id, code: failure.code });
+    });
+  }
+}
+
+function autDriveAclRecordAudit_(actor, action, details) {
+  try {
+    autAudit_(actor, action, 'SISTEMA', 'DRIVE_ACL', details, {
+      requestId: 'drive-acl-' + Utilities.getUuid(),
+      device: { origem: 'EDITOR_APPS_SCRIPT' }
+    });
+  } catch (auditError) {
+    console.warn('A manutenção do Drive foi concluída, mas o registro de auditoria falhou: ' +
+      String(auditError && auditError.message || auditError).slice(0, 200));
+  }
+}
+
+function diagnosticarPermissoesPublicasDriveSetup(limite) {
+  var actor = autDriveAclOperator_();
+  var maxTargets = autDriveAclLimit_(limite);
+  var targets = autDriveAclRootTargets_().concat(autDriveAclDocumentTargets_());
+  var stats = autDriveAclInitialStats_();
+  targets.slice(0, maxTargets).forEach(function(target) {
+    try {
+      autDriveAclMergeStats_(stats, autDriveAclInspectTarget_(target, false));
+    } catch (err) {
+      autDriveAclMergeStats_(stats, {
+        kind: target.kind,
+        id: target.id,
+        failures: [{ code: String(err && err.code || 'DRIVE_API_ERROR').slice(0, 80) }]
+      });
+    }
+  });
+  var result = {
+    ok: stats.targetsWithFailures === 0,
+    mode: 'READ_ONLY',
+    partial: targets.length > maxTargets,
+    totalTargets: targets.length,
+    inspectedTargets: Math.min(targets.length, maxTargets),
+    stats: stats,
+    message: targets.length > maxTargets
+      ? 'Diagnóstico parcial concluído; aumente o lote ou execute a higienização retomável.'
+      : 'Diagnóstico de permissões públicas concluído sem alterar o Drive.'
+  };
+  autDriveAclRecordAudit_(actor, 'DRIVE_PERMISSOES_PUBLICAS_DIAGNOSTICADAS', result);
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+function higienizarPermissoesPublicasDriveSetup(limite) {
+  var actor = autDriveAclOperator_();
+  var maxTargets = autDriveAclLimit_(limite);
+  var props = PropertiesService.getScriptProperties();
+  var roots = autDriveAclRootTargets_();
+  var documents = autDriveAclDocumentTargets_();
+  var rootFingerprint = autHash_(roots.map(function(target) { return target.id; }).join('|'));
+  var state = autJsonParse_(props.getProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_), null);
+  if (!state || Number(state.version || 0) !== 1) {
+    state = {
+      version: 1,
+      runId: Utilities.getUuid(),
+      startedAt: autNow_(),
+      rootFingerprint: rootFingerprint,
+      rootIndex: 0,
+      documentRowCursor: 1,
+      stats: autDriveAclInitialStats_()
+    };
+  }
+  if (state.rootFingerprint !== rootFingerprint) {
+    // Uma rotação de raiz reinicia apenas a etapa de pastas. As exclusões são
+    // idempotentes e os documentos já percorridos não precisam ser refeitos.
+    state.rootFingerprint = rootFingerprint;
+    state.rootIndex = 0;
+  }
+  state.stats = state.stats || autDriveAclInitialStats_();
+
+  var processedThisBatch = 0;
+  function processTarget(target) {
+    try {
+      autDriveAclMergeStats_(state.stats, autDriveAclInspectTarget_(target, true));
+    } catch (err) {
+      autDriveAclMergeStats_(state.stats, {
+        kind: target.kind,
+        id: target.id,
+        failures: [{ code: String(err && err.code || 'DRIVE_API_ERROR').slice(0, 80) }]
+      });
+    }
+    processedThisBatch++;
+    state.updatedAt = autNow_();
+    // Cursor gravado após cada alvo: uma interrupção retoma do ponto seguro.
+    props.setProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_, JSON.stringify(state));
+  }
+
+  while (processedThisBatch < maxTargets && Number(state.rootIndex || 0) < roots.length) {
+    var rootTarget = roots[Number(state.rootIndex || 0)];
+    processTarget(rootTarget);
+    state.rootIndex = Number(state.rootIndex || 0) + 1;
+    props.setProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_, JSON.stringify(state));
+  }
+
+  for (var i = 0; processedThisBatch < maxTargets && i < documents.length; i++) {
+    if (Number(documents[i].row || 0) <= Number(state.documentRowCursor || 1)) continue;
+    processTarget(documents[i]);
+    state.documentRowCursor = Number(documents[i].row || state.documentRowCursor);
+    props.setProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_, JSON.stringify(state));
+  }
+
+  var hasPendingRoots = Number(state.rootIndex || 0) < roots.length;
+  var hasPendingDocuments = documents.some(function(target) {
+    return Number(target.row || 0) > Number(state.documentRowCursor || 1);
+  });
+  var complete = !hasPendingRoots && !hasPendingDocuments;
+  var result = {
+    ok: state.stats.targetsWithFailures === 0,
+    mode: 'REMOVE_ANYONE_ONLY',
+    runId: state.runId,
+    startedAt: state.startedAt,
+    updatedAt: autNow_(),
+    complete: complete,
+    processedThisBatch: processedThisBatch,
+    totalTargetsAtThisRun: roots.length + documents.length,
+    nextRootIndex: Number(state.rootIndex || 0),
+    nextDocumentRow: Number(state.documentRowCursor || 1),
+    stats: state.stats,
+    message: complete
+      ? 'Higienização concluída. Somente permissões públicas do tipo anyone foram removidas.'
+      : 'Lote concluído com segurança. Execute higienizarPermissoesPublicasDriveSetup novamente para continuar.'
+  };
+
+  if (complete) {
+    props.deleteProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_);
+    props.setProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_LAST_KEY_, JSON.stringify(result));
+  } else {
+    props.setProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_, JSON.stringify(state));
+  }
+  autDriveAclRecordAudit_(actor, 'DRIVE_PERMISSOES_PUBLICAS_HIGIENIZADAS', result);
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+function reiniciarCursorHigienizacaoPermissoesDriveSetup() {
+  var actor = autDriveAclOperator_();
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty(AUT_DRIVE_PUBLIC_ACL_CLEANUP_STATE_KEY_);
+  var result = {
+    ok: true,
+    resetAt: autNow_(),
+    message: 'O cursor foi reiniciado. Nenhum arquivo ou permissão do Drive foi alterado.'
+  };
+  autDriveAclRecordAudit_(actor, 'DRIVE_HIGIENIZACAO_CURSOR_REINICIADO', result);
+  console.log(JSON.stringify(result));
+  return result;
 }
 
 function autEnsureOpenTrigger_() {

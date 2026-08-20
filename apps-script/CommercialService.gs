@@ -983,18 +983,38 @@ function autMasterValue_(value) {
   return String(value).trim();
 }
 
+// O Sheets pode devolver células formatadas como data tanto como string quanto
+// como Date nativo. O formato público precisa ser estável e aceito diretamente
+// pelos campos HTML `date`, sem deslocar o dia por conversão de fuso horário.
+function autMasterDateOnly_(value) {
+  if (value == null || value === '') return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    var time = value.getTime();
+    return isFinite(time) ? Utilities.formatDate(value, AUTENTIKO.TIMEZONE, 'yyyy-MM-dd') : '';
+  }
+  var text = String(value).trim();
+  if (!text) return '';
+  var match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[Tt\s].*)?$/);
+  if (!match) {
+    var br = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (br) match = [br[0], br[3], br[2], br[1]];
+  }
+  if (!match) return text;
+  var year = Number(match[1]);
+  var month = Number(match[2]);
+  var day = Number(match[3]);
+  var maxDay = month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
+  if (year < 1 || day < 1 || day > maxDay) return text;
+  return String(year).padStart(4, '0') + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+}
+
 function autMasterComparable_(field, value) {
+  if (field === 'DATA_NASCIMENTO_ABERTURA') return autNormalize_(autMasterDateOnly_(value));
   var text = autMasterValue_(value);
   if (field === 'CPF_CNPJ') return autMasterCanonicalDocument_('', text);
   if (field === 'TELEFONE' || field === 'TELEFONE_RECADO') return autDigits_(text);
   if (field === 'EMAIL') return autNormalizeEmail_(text);
   if (field === 'RENDA') return String(Number(value || 0));
-  if (field === 'DATA_NASCIMENTO_ABERTURA') {
-    var iso = text.match(/(\d{4})-(\d{2})-(\d{2})/);
-    if (iso) return iso[1] + '-' + iso[2] + '-' + iso[3];
-    var br = text.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-    if (br) return br[3] + '-' + br[2] + '-' + br[1];
-  }
   if (field === 'ENDERECO_JSON') {
     var address = typeof value === 'object' && value ? value : autJsonParse_(text, {});
     return autJson_({
@@ -1332,7 +1352,7 @@ function autMasterClientPublic_(row, full) {
     processCount: autJsonParse_(row.PROCESSOS_JSON, []).length, updatedAt: row.ATUALIZADO_EM
   };
   if (full) Object.assign(result, {
-    rgIe: row.RG_IE, issuer: row.ORGAO_EXPEDIDOR, birthOpening: row.DATA_NASCIMENTO_ABERTURA,
+    rgIe: row.RG_IE, issuer: row.ORGAO_EXPEDIDOR, birthOpening: autMasterDateOnly_(row.DATA_NASCIMENTO_ABERTURA),
     nationality: row.NACIONALIDADE, maritalStatus: row.ESTADO_CIVIL, propertyRegime: row.REGIME_BENS,
     profession: row.PROFISSAO, income: Number(row.RENDA || 0), incomeOrigin: row.RENDA_ORIGEM,
     employer: row.EMPRESA_TRABALHO, job: row.CARGO_FUNCAO,

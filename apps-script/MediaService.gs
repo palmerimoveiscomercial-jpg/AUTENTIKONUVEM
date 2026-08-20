@@ -1,10 +1,85 @@
 var AUT_MEDIA_TICKET_ACTIONS = Object.freeze([
   'UPLOAD', 'VIEW', 'DOWNLOAD', 'STATUS', 'REPROCESS'
 ]);
+var AUT_MEDIA_DIRECT_DRIVE_LIMIT_BYTES = 6 * 1024 * 1024;
+var AUT_MEDIA_LARGE_UPLOAD_HEALTH_CACHE_KEY = 'AUT_MEDIA_LARGE_UPLOAD_HEALTH_V1';
 
 function mediaCloudEnabled_() {
   var configured = autConfigMap_().MEDIA_CLOUD_ENABLED;
   return configured === true || autNormalize_(configured) === 'SIM' || autNormalize_(configured) === 'TRUE';
+}
+
+function mediaLargeUploadConfigured_() {
+  var config = autConfigMap_();
+  var enabled = config.MEDIA_LARGE_UPLOAD_ENABLED === true ||
+    autNormalize_(config.MEDIA_LARGE_UPLOAD_ENABLED) === 'SIM' ||
+    autNormalize_(config.MEDIA_LARGE_UPLOAD_ENABLED) === 'TRUE';
+  var workerReady = config.MEDIA_DRIVE_SYNC_WORKER_READY === true ||
+    autNormalize_(config.MEDIA_DRIVE_SYNC_WORKER_READY) === 'SIM' ||
+    autNormalize_(config.MEDIA_DRIVE_SYNC_WORKER_READY) === 'TRUE';
+  return mediaCloudEnabled_() && enabled && workerReady;
+}
+
+function mediaLargeUploadReadiness_(forceRemote) {
+  var result = {
+    ready: false,
+    configured: mediaLargeUploadConfigured_(),
+    remoteChecked: false,
+    databaseReady: false,
+    workerReady: false,
+    directDriveLimitBytes: AUT_MEDIA_DIRECT_DRIVE_LIMIT_BYTES,
+    code: 'LARGE_UPLOAD_SAFETY_HOLD',
+    message: 'Uploads acima de 6 MB estão temporariamente bloqueados até a cópia automática no Google Drive ser confirmada. Nenhum arquivo foi alterado.'
+  };
+  if (!result.configured) return result;
+
+  var cache = CacheService.getScriptCache();
+  if (!forceRemote) {
+    var cached = autJsonParse_(cache.get(AUT_MEDIA_LARGE_UPLOAD_HEALTH_CACHE_KEY), null);
+    if (cached && Number(cached.checkedAt || 0) > Date.now() - 60000) return cached;
+  }
+
+  result.remoteChecked = true;
+  try {
+    var response = UrlFetchApp.fetch(mediaApiBaseUrl_() + '/api/health?deep=1', {
+      method: 'get',
+      muteHttpExceptions: true,
+      followRedirects: false,
+      headers: { 'Cache-Control': 'no-cache', 'X-Autentiko-Health': 'large-upload' }
+    });
+    var status = Number(response.getResponseCode() || 0);
+    var parsed = autJsonParse_(response.getContentText(), {});
+    var data = parsed && parsed.data || {};
+    var worker = data.driveSyncWorker || {};
+    result.databaseReady = data.database === true;
+    result.workerReady = worker.healthy === true;
+    result.ready = status >= 200 && status < 300 && parsed.ok === true &&
+      result.databaseReady && result.workerReady;
+    if (result.ready) {
+      result.code = '';
+      result.message = 'Nuvem e cópia automática no Google Drive confirmadas.';
+    } else {
+      result.message = 'O arquivo não foi enviado: o worker de cópia para o Google Drive não respondeu como saudável. Nenhum arquivo foi alterado.';
+    }
+  } catch (err) {
+    result.message = 'O arquivo não foi enviado porque a verificação da cópia automática no Google Drive falhou. Nenhum arquivo foi alterado.';
+  }
+  result.checkedAt = Date.now();
+  autCachePut_(cache, AUT_MEDIA_LARGE_UPLOAD_HEALTH_CACHE_KEY, result, result.ready ? 60 : 15);
+  return result;
+}
+
+function mediaAssertLargeUploadReady_(size) {
+  if (Number(size || 0) <= AUT_MEDIA_DIRECT_DRIVE_LIMIT_BYTES) return;
+  var readiness = mediaLargeUploadReadiness_(false);
+  autAssert_(readiness.ready, readiness.message, readiness.code || 'LARGE_UPLOAD_SAFETY_HOLD');
+}
+
+function apiVerificarProntidaoUploadGrande(token, forceRemote) {
+  try {
+    autRequireAuth_(token, 'DOCUMENTO_ENVIAR');
+    return autResult_(mediaLargeUploadReadiness_(forceRemote === true));
+  } catch (err) { return autPublicError_(err); }
 }
 
 function mediaApiBaseUrl_() {
@@ -172,6 +247,9 @@ function apiReservarUploadNuvem(token, payload) {
       'Formato de arquivo não permitido.', 'INVALID_FILE');
     var size = Number(payload.size || 0);
     autAssert_(isFinite(size) && size > 0, 'O arquivo selecionado está vazio.', 'INVALID_FILE');
+    // Contenção fail-closed: nenhuma linha, ticket ou objeto é criado enquanto
+    // a redundância Supabase -> Drive de arquivos grandes não estiver saudável.
+    mediaAssertLargeUploadReady_(size);
     var hash = String(payload.sha256 || '').toLowerCase();
     autAssert_(/^[a-f0-9]{64}$/.test(hash), 'Hash SHA-256 inválido.', 'HASH_INVALID');
     var catalog = autDocumentCatalog_().filter(function(item) {
