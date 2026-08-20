@@ -141,7 +141,7 @@
     apiReprocessarMidia: 30000
   };
   const BROWSER_CACHE = Object.freeze({
-    schemaVersion: '2.5.4',
+    schemaVersion: '2.5.5',
     database: 'AUTENTIKO_BROWSER_CACHE',
     store: 'entries',
     maxBytes: 96 * 1024 * 1024,
@@ -3935,7 +3935,13 @@
       returnModal,
       returnFocus: button
     });
-    setBusy(button, true, 'Abrindo...');
+    const busyButton = button instanceof HTMLButtonElement ? button : null;
+    const busyMedia = button?.classList?.contains('visual-doc-media') ? button : null;
+    setBusy(busyButton, true, 'Abrindo...');
+    if (busyMedia) {
+      busyMedia.classList.add('preview-opening');
+      busyMedia.setAttribute('aria-busy', 'true');
+    }
     let fullFileReady = false;
     try {
       void (async () => {
@@ -3993,7 +3999,31 @@
         }
       }
     }
-    finally { setBusy(button, false); }
+    finally {
+      setBusy(busyButton, false);
+      if (busyMedia?.isConnected) {
+        busyMedia.classList.remove('preview-opening');
+        busyMedia.removeAttribute('aria-busy');
+      }
+    }
+  }
+
+  function restoreVisualThumbnailsAfterPreview() {
+    if (state.processDetailTab !== 'documents' || !state.currentProcess) return;
+    const pane = $('[data-process-detail-pane="documents"]', $('#detail-content'));
+    if (!pane) return;
+    const cards = $$('[data-visual-document]', pane);
+    const corrupted = cards.some(card => !card.querySelector('[data-visual-thumbnail]'));
+    if (corrupted) {
+      renderProcessPane('documents', state.currentProcess);
+      return;
+    }
+    cards.forEach(card => {
+      if (card.dataset.thumbnailState === 'loaded' && !card.querySelector('[data-visual-thumbnail] img')) {
+        delete card.dataset.thumbnailState;
+      }
+    });
+    scheduleVisualThumbnails();
   }
 
   function closePreview() {
@@ -4005,6 +4035,7 @@
     if (returnModal && $('#' + returnModal)) openModal(returnModal);
     else closeModal();
     requestAnimationFrame(() => {
+      restoreVisualThumbnailsAfterPreview();
       if (returnFocus?.isConnected && typeof returnFocus.focus === 'function') returnFocus.focus();
     });
   }

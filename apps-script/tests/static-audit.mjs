@@ -326,7 +326,10 @@ check('cache seguro, resistente e sem recarregar prévias ou abas', () => {
   assert.match(scriptsHtml, /if \(!rendered\) renderProcessPane/);
   assert.doesNotMatch(scriptsHtml, /state\.processLoadedTabs\.has\(normalized\)\)\s*\{\s*renderProcessPane/);
   assert.match(scriptsHtml, /state\.processTabScroll\.set/);
-  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.4'/);
+  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.5'/);
+  assert.match(scriptsHtml, /const busyButton = button instanceof HTMLButtonElement \? button : null/);
+  assert.match(scriptsHtml, /function restoreVisualThumbnailsAfterPreview/);
+  assert.doesNotMatch(scriptsHtml, /setBusy\(button, true, 'Abrindo\.\.\.'\)/);
   assert.match(scriptsHtml, /canvasToBoundedThumbnailBlob\(canvas, preferredType, 80 \* 1024\)/);
   assert.match(scriptsHtml, /maxWidth = 360/);
   assert.match(scriptsHtml, /maxHeight = 270/);
