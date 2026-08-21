@@ -524,7 +524,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, 683);
-  assert.equal(diagnostic.codeVersion, '2.5.6');
+  assert.equal(diagnostic.codeVersion, '2.5.7');
   assert.ok(diagnostic.maxFormCacheBytes < 15_000);
 });
 
@@ -728,6 +728,10 @@ check('captação e homologação cria imóvel com documentação obrigatória p
   captureData.imovel_matricula = 'CAP-MAT-001';
   captureData.imovel_endereco = 'Avenida da Captação, 10, Belém - PA';
   const created = data(context.apiCriarProcesso(token, { type: 'CAPTACAO_HOMOLOGACAO_IMOVEL', data: captureData }, { requestId: 'capture-process-one' }));
+  assert.equal(created.process.clientName, captureData.titular_nome);
+  const captureRow = context.autFind_('PROCESSOS', 'ID_PROCESSO', created.process.id);
+  assert.equal(captureRow.CLIENTE_NOME, captureData.titular_nome);
+  assert.equal(captureRow.CLIENTE_CPF, String(captureData.titular_cpf).replace(/\D/g, ''));
   const detail = data(context.apiDetalharProcesso(token, created.process.id));
   const required = detail.requiredDocuments.filter((document) => document.required).map((document) => document.id);
   assert.ok(required.includes('DOC_RG_CNH_PROPRIETARIO'));

@@ -65,6 +65,8 @@
     cloudAccessCache: new Map(),
     cloudPreviewCircuitUntil: 0,
     cloudPreviewFailures: 0,
+    cloudReplicaCircuitUntil: 0,
+    cloudReplicaFailures: 0,
     imageEncoderSupport: new Map(),
     formSchemaFetches: new Map(),
     processDraftDirty: false,
@@ -166,6 +168,7 @@
   const CLOUD_PREVIEW_TIMEOUT_MS = 8000;
   const CLOUD_DOCUMENT_TIMEOUT_MS = 15000;
   const CLOUD_PREVIEW_CIRCUIT_MS = 45 * 1000;
+  const CLOUD_REPLICA_CIRCUIT_MS = 5 * 60 * 1000;
   const SHORT_PROCESS_DRAFT_TTL_MS = 10 * 60 * 1000;
   const CUSTOMER_LOOKUP_TTL_MS = 10 * 60 * 1000;
   const CUSTOMER_LOOKUP_MISS_TTL_MS = 60 * 1000;
@@ -258,6 +261,8 @@
       state.cloudAccessCache.clear();
       state.cloudPreviewCircuitUntil = 0;
       state.cloudPreviewFailures = 0;
+      state.cloudReplicaCircuitUntil = 0;
+      state.cloudReplicaFailures = 0;
     }
   }
 
@@ -789,15 +794,17 @@
     return {search:$('#process-search').value, status:$('#process-status').value, type:$('#process-type').value, mine:$('#process-mine').checked, pageSize:100};
   }
 
-  async function loadProcesses(mode = 'dashboard') {
+  async function loadProcesses(mode = 'dashboard', options = {}) {
     const target = mode === 'dashboard' ? $('#dashboard-processes') : $('#all-processes');
-    target.innerHTML = '<div class="empty-state">Carregando processos...</div>';
+    if (!options.silent) target.innerHTML = '<div class="empty-state">Carregando processos...</div>';
     try {
       const result = await api('apiListarProcessos', state.token, processFilters(mode));
       state.processes = result.items;
       renderProcesses(target, result.items);
       renderMetrics(result.dashboard);
-    } catch (error) { target.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`; }
+    } catch (error) {
+      if (!options.silent) target.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
+    }
   }
 
   async function loadContracts() {
@@ -1029,12 +1036,30 @@
     target.innerHTML = items.map(item => `
       <article class="process-row" data-process-id="${esc(item.id)}" tabindex="0" title="Dê dois cliques para abrir os documentos visuais">
         <div class="process-protocol">#${esc(item.protocol)}</div>
-        <div class="process-client"><strong>${esc(item.clientName || 'Cliente não informado')}</strong><small>${esc(item.clientCpf || item.clientEmail || '')}</small></div>
+        <div class="process-client"><strong>${esc(item.clientName || 'Parte principal não informada')}</strong><small>${esc(item.clientCpf || item.clientEmail || '')}</small></div>
         <div class="process-meta"><strong>${esc(item.typeLabel)}</strong><small>${esc(item.propertyAddress || item.clientAddress || '')}</small></div>
         <span class="status-badge status-${esc(item.status)}">${esc(statusText(item.status))}</span>
         <div class="process-meta"><strong>${esc(item.responsible || '—')}</strong><small>Atualizado ${dateText(item.updatedAt)}</small></div>
         <div class="process-row-actions"><button type="button" class="row-flow" data-open-process-flow="${esc(item.id)}" title="Abrir fluxograma do processo">Fluxo</button><button type="button" class="row-open" data-open-process="${esc(item.id)}" title="Abrir processo">›</button></div>
       </article>`).join('');
+  }
+
+  function patchVisibleProcessCard(item) {
+    if (!item?.id) return;
+    state.processes = state.processes.map(current => current.id === item.id ? {...current, ...item} : current);
+    const selector = `[data-process-id="${CSS.escape(String(item.id))}"]`;
+    $$(selector).forEach(row => {
+      const host = document.createElement('div');
+      host.innerHTML = `<article class="process-row" data-process-id="${esc(item.id)}" tabindex="0" title="Dê dois cliques para abrir os documentos visuais">
+        <div class="process-protocol">#${esc(item.protocol)}</div>
+        <div class="process-client"><strong>${esc(item.clientName || 'Parte principal não informada')}</strong><small>${esc(item.clientCpf || item.clientEmail || '')}</small></div>
+        <div class="process-meta"><strong>${esc(item.typeLabel)}</strong><small>${esc(item.propertyAddress || item.clientAddress || '')}</small></div>
+        <span class="status-badge status-${esc(item.status)}">${esc(statusText(item.status))}</span>
+        <div class="process-meta"><strong>${esc(item.responsible || '—')}</strong><small>Atualizado ${dateText(item.updatedAt)}</small></div>
+        <div class="process-row-actions"><button type="button" class="row-flow" data-open-process-flow="${esc(item.id)}" title="Abrir fluxograma do processo">Fluxo</button><button type="button" class="row-open" data-open-process="${esc(item.id)}" title="Abrir processo">›</button></div>
+      </article>`;
+      row.replaceWith(host.firstElementChild);
+    });
   }
 
   function showView(view) {
@@ -1653,6 +1678,56 @@
 
   const formatBRL = value => Number(value || 0).toLocaleString('pt-BR', {style:'currency', currency:'BRL'});
 
+  function primaryPartyFromProcessForm(type, data) {
+    const prefix = type === 'CAPTACAO_HOMOLOGACAO_IMOVEL' ? 'titular' : 'cliente';
+    return {
+      name:data[`${prefix}_nome`] || '',
+      cpf:formatCpfDisplay(data[`${prefix}_cpf`] || ''),
+      email:data[`${prefix}_email`] || '',
+      contact:data[`${prefix}_contato`] || '',
+      address:[data[`${prefix}_rua`],data[`${prefix}_numero`],data[`${prefix}_bairro`],data[`${prefix}_cidade`],data[`${prefix}_cep`]].filter(Boolean).join(', ')
+    };
+  }
+
+  function applySavedProcessFormLocally(processId, type, data, result) {
+    if (state.currentProcess?.process?.id !== processId) return;
+    const primary = primaryPartyFromProcessForm(type, data);
+    const version = Number(result?.version || state.currentProcess.process.version || 1);
+    const process = {
+      ...state.currentProcess.process,
+      version,
+      clientName:primary.name,
+      clientCpf:primary.cpf,
+      clientEmail:primary.email,
+      clientContact:primary.contact,
+      clientAddress:primary.address,
+      responsible:data.responsavel_processo || state.currentProcess.process.responsible,
+      propertyCode:data.imovel_codigo || '',
+      propertyAddress:data.imovel_endereco || data.imovel_localidade || '',
+      updatedAt:new Date().toISOString()
+    };
+    state.currentProcess = {...state.currentProcess, process, data:{...(state.currentProcess.data || {}), ...data}};
+    invalidateProcessTabCache(processId, ['review','audit']);
+    state.processLoadedTabs.delete('review');
+    state.processLoadedTabs.delete('audit');
+    state.processLoadedTabs.add('registration');
+    state.processTabVersions.set('registration', version);
+    setProcessTabCache(processId, 'registration', {
+      tab:'CADASTRO', processVersion:version, data:state.currentProcess.data,
+      formFields:state.currentProcess.formFields || [], commercial:state.currentProcess.commercial || {}
+    });
+    setProcessShellCache(processId, {
+      process,
+      workflow:state.currentProcess.workflow,
+      capabilities:state.currentProcess.capabilities,
+      tabMeta:{...(state.currentProcess.tabMeta || {}), version}
+    });
+    patchVisibleProcessCard(process);
+    state.processDetailTab = 'registration';
+    renderProcessShell(state.currentProcess);
+    renderProcessPane('registration', state.currentProcess);
+  }
+
   function incomeEvaluationFromForm() {
     const type = $('#new-process-type').value;
     const applicable = ['ALUGUEL_ANUAL','ALUGUEL_SEMESTRAL','ALUGUEL_TRIMESTRAL','ALUGUEL_MENSAL'].includes(type);
@@ -1706,17 +1781,19 @@
         state.processEditId = '';
         state.processEditExpectedVersion = 0;
         $('#new-process-type').disabled = false;
-        closeModal(true);
+        applySavedProcessFormLocally(processId, type, data, result);
+        openModal('detail-modal');
         toast(`Ficha atualizada com segurança para a versão ${result.version}.`, 'success');
-        await Promise.all([loadProcesses('dashboard'), openProcess(processId, 'registration')]);
+        scheduleProcessListRefresh();
       } catch (error) {
         toast(error.message, 'error');
       } finally { setBusy(button, false); }
       return;
     }
+    const primaryParty = primaryPartyFromProcessForm(type, data);
     const temp = {
-      id:`temp-${Date.now()}`,protocol:'SALVANDO',clientName:data.cliente_nome,typeLabel:state.bootstrap.processTypes.find(item=>item.value===type)?.label,
-      status:'PENDENTE',responsible:data.responsavel_processo || state.bootstrap.user.name,updatedAt:new Date().toISOString(),clientCpf:data.cliente_cpf,propertyAddress:data.imovel_endereco
+      id:`temp-${Date.now()}`,protocol:'SALVANDO',clientName:primaryParty.name,typeLabel:state.bootstrap.processTypes.find(item=>item.value===type)?.label,
+      status:'PENDENTE',responsible:data.responsavel_processo || state.bootstrap.user.name,updatedAt:new Date().toISOString(),clientCpf:primaryParty.cpf,propertyAddress:data.imovel_endereco
     };
     const target = $('#dashboard-processes');
     const original = state.processes.slice();
@@ -1728,10 +1805,10 @@
       clearShortProcessDraft(type);
       closeModal(true);
       toast(`Processo ${result.process.protocol} criado. Agora envie os documentos.`, 'success');
-      await Promise.all([
-        loadProcesses('dashboard'),
-        openDocumentUploadStep(result.process.id, result.process.protocol)
-      ]);
+      state.processes = [result.process, ...original.filter(item => item.id !== result.process.id)];
+      renderProcesses(target, state.processes);
+      scheduleProcessListRefresh();
+      await openDocumentUploadStep(result.process.id, result.process.protocol);
     } catch (error) {
       renderProcesses(target, original);
       toast(error.message, 'error');
@@ -2886,7 +2963,7 @@
       }
       closeModal();
       toast('Cadastro salvo. A documentação poderá ser concluída depois.', 'success');
-      await loadProcesses('dashboard');
+      scheduleProcessListRefresh();
     } catch (error) {
       toast(error.message, 'error');
     } finally {
@@ -2933,8 +3010,11 @@
   function scheduleProcessListRefresh() {
     clearTimeout(state.processListRefreshTimer);
     state.processListRefreshTimer = setTimeout(() => {
-      loadProcesses('dashboard').catch(() => {});
-    }, 500);
+      const mode = $('.nav-btn.active')?.dataset.view === 'processes' ? 'processes' : 'dashboard';
+      const refresh = () => loadProcesses(mode, {silent:true}).catch(() => {});
+      if (globalThis.requestIdleCallback) requestIdleCallback(refresh, {timeout:2000});
+      else refresh();
+    }, 3500);
   }
 
   async function syncProcessAfterMutation(tabs = [state.processDetailTab]) {
@@ -3683,6 +3763,20 @@
     if (state.cloudPreviewFailures >= 1) {
       state.cloudPreviewCircuitUntil = Date.now() + CLOUD_PREVIEW_CIRCUIT_MS;
     }
+  }
+
+  function cloudReplicaCircuitOpen() {
+    return Number(state.cloudReplicaCircuitUntil || 0) > Date.now();
+  }
+
+  function cloudReplicaSucceeded() {
+    state.cloudReplicaFailures = 0;
+    state.cloudReplicaCircuitUntil = 0;
+  }
+
+  function cloudReplicaFailed() {
+    state.cloudReplicaFailures = Number(state.cloudReplicaFailures || 0) + 1;
+    state.cloudReplicaCircuitUntil = Date.now() + CLOUD_REPLICA_CIRCUIT_MS;
   }
 
   async function fetchCloudStoredDocument(id, onProgress, usage = 'PREVIEW') {
@@ -4570,6 +4664,13 @@
       job.file = null;
       return;
     }
+    if (navigator.onLine === false || cloudReplicaCircuitOpen()) {
+      job.warning = 'Original salvo no Google Drive. A aceleração em nuvem foi pausada temporariamente para não deixar o sistema lento.';
+      job.syncMessage = job.warning;
+      job.file = null;
+      renderUploadQueue();
+      return;
+    }
     job.replicaInProgress = true;
     job.warning = '';
     job.syncMessage = 'Original salvo no Drive. Criando a cópia rápida sem bloquear a tela…';
@@ -4587,6 +4688,7 @@
       job.syncMessage = job.driveSyncPending
         ? job.warning
         : 'Salvo no Google Drive e sincronizado com a nuvem rápida.';
+      cloudReplicaSucceeded();
     } catch (cloudError) {
       let synchronized = false;
       try {
@@ -4597,6 +4699,7 @@
         job.warning = '';
         job.syncMessage = 'Salvo no Google Drive e sincronizado com a nuvem rápida.';
       } else {
+        cloudReplicaFailed();
         job.warning = 'Salvo com segurança no Google Drive. O Supabase oscilou; a réplica rápida ficou pendente sem bloquear o arquivo.';
         job.syncMessage = job.warning;
         job.cloudError = cloudError?.code || cloudError?.message || 'MEDIA_REPLICA_PENDING';

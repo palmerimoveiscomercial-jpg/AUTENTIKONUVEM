@@ -284,6 +284,9 @@ check('modal estável com quatro abas e carregamento sob demanda', () => {
   assert.doesNotMatch(scriptsHtml, /normalized\.toUpperCase\(\)/);
   assert.match(serverSource, /REGISTRATION:\s*'CADASTRO'/);
   assert.match(scriptsHtml, /function syncProcessAfterMutation/);
+  assert.match(scriptsHtml, /function applySavedProcessFormLocally/);
+  assert.match(scriptsHtml, /loadProcesses\(mode, \{silent:true\}\)/);
+  assert.doesNotMatch(scriptsHtml, /Promise\.all\(\[loadProcesses\('dashboard'\), openProcess/);
   assert.match(scriptsHtml, /if \(payload\.formFields\) next\.formFields = payload\.formFields/);
   assert.match(scriptsHtml, /const shellCached = getProcessShellCache\(id\)/);
   assert.match(scriptsHtml, /getProcessTabCache\(id, state\.processDetailTab, shellCached\?\.payload\?\.process\?\.version\)/);
@@ -372,6 +375,8 @@ check('prévia PDF persistente possui flag, validação, auditoria e rollback se
   assert.match(serverSource, /apiFinalizarUploadNuvem/);
   assert.match(scriptsHtml, /runCloudUploadJob/);
   assert.match(scriptsHtml, /function replicateDriveUploadInBackground/);
+  assert.match(scriptsHtml, /function cloudReplicaCircuitOpen/);
+  assert.match(scriptsHtml, /CLOUD_REPLICA_CIRCUIT_MS = 5 \* 60 \* 1000/);
   assert.match(scriptsHtml, /Criando a cópia rápida sem bloquear a tela/);
   assert.match(scriptsHtml, /function mediaLargeUploadConfigured/);
   assert.match(scriptsHtml, /A cópia de segurança no Google Drive ainda está pendente; a redundância não foi concluída/);

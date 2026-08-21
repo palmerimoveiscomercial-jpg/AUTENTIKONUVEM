@@ -42,7 +42,24 @@ function autCanManageProcessDocuments_(user, process) {
   return autCanActOnProcess_(user, process, 'DOCUMENTO_ENVIAR');
 }
 
+function autPrimaryProcessParty_(type, data) {
+  data = data || {};
+  var capture = String(type || '') === 'CAPTACAO_HOMOLOGACAO_IMOVEL';
+  var prefix = capture ? 'titular' : 'cliente';
+  return {
+    name: data[prefix + '_nome'] || '',
+    cpf: autDigits_(data[prefix + '_cpf']),
+    document: data[prefix + '_documento'] || '',
+    email: autNormalizeEmail_(data[prefix + '_email']),
+    contact: data[prefix + '_contato'] || '',
+    address: autAddressFromData_(data, prefix)
+  };
+}
+
 function autProcessCard_(row) {
+  var legacyCaptureName = String(row.TIPO_PROCESSO || '') === 'CAPTACAO_HOMOLOGACAO_IMOVEL'
+    ? (row.TITULAR_NOME || autJsonParse_(row.DADOS_JSON, {}).titular_nome || '')
+    : '';
   return {
     id: row.ID_PROCESSO,
     protocol: String(row.PROTOCOLO),
@@ -61,7 +78,7 @@ function autProcessCard_(row) {
     forwardedAt: row.ENCAMINHADO_EM,
     forwardedBy: row.ENCAMINHADO_POR,
     creator: row.CRIADOR,
-    clientName: row.CLIENTE_NOME,
+    clientName: row.CLIENTE_NOME || legacyCaptureName,
     clientCpf: autFormatCpf_(row.CLIENTE_CPF),
     clientRg: row.CLIENTE_RG,
     clientEmail: row.CLIENTE_EMAIL,
@@ -103,7 +120,8 @@ function autProcessDataMap_(process) {
 function autProcessSummaryJson_(data) {
   var keys = [
     'cliente_nome', 'cliente_cpf', 'cliente_email', 'cliente_contato',
-    'titular_nome', 'imovel_codigo', 'imovel_endereco', 'imovel_localidade',
+    'titular_nome', 'titular_cpf', 'titular_email', 'titular_contato',
+    'imovel_codigo', 'imovel_endereco', 'imovel_localidade',
     'valor_aluguel_mensal', 'valor_aluguel', 'valor_negociado',
     'aceite_renda_insuficiente', 'aceite_renda_token', 'aceite_renda_em', 'aceite_renda_por'
   ];
@@ -144,7 +162,7 @@ function apiListarProcessos(token, filters) {
       if (filters.phase && row.FASE !== filters.phase) return false;
       if (filters.mine && String(row.ID_RESPONSAVEL) !== String(user.ID_USUARIO)) return false;
       if (search) {
-        var haystack = autNormalize_([row.PROTOCOLO, row.CLIENTE_NOME, row.CLIENTE_CPF, row.CLIENTE_EMAIL, row.RESPONSAVEL, row.IMOVEL_ENDERECO].join(' '));
+        var haystack = autNormalize_([row.PROTOCOLO, row.CLIENTE_NOME, row.TITULAR_NOME, row.CLIENTE_CPF, row.CLIENTE_EMAIL, row.RESPONSAVEL, row.IMOVEL_ENDERECO].join(' '));
         if (haystack.indexOf(search) < 0) return false;
       }
       return true;
@@ -270,6 +288,7 @@ function apiCriarProcesso(token, payload, context) {
     var protocol = autGenerateProtocol_();
     var now = autNow_();
     var incomeEvaluation = autApplyIncomeAcceptance_(type, data, user, now);
+    var primaryParty = autPrimaryProcessParty_(type, data);
     var process = {
       ID_PROCESSO: id,
       PROTOCOLO: protocol,
@@ -280,12 +299,12 @@ function apiCriarProcesso(token, payload, context) {
       RESPONSAVEL: data.responsavel_processo || user.NOME,
       ID_CRIADOR: user.ID_USUARIO,
       CRIADOR: user.NOME,
-      CLIENTE_NOME: data.cliente_nome || '',
-      CLIENTE_CPF: autDigits_(data.cliente_cpf),
-      CLIENTE_RG: data.cliente_documento || '',
-      CLIENTE_EMAIL: autNormalizeEmail_(data.cliente_email),
-      CLIENTE_CONTATO: data.cliente_contato || '',
-      CLIENTE_ENDERECO: autAddressFromData_(data, 'cliente'),
+      CLIENTE_NOME: primaryParty.name,
+      CLIENTE_CPF: primaryParty.cpf,
+      CLIENTE_RG: primaryParty.document,
+      CLIENTE_EMAIL: primaryParty.email,
+      CLIENTE_CONTATO: primaryParty.contact,
+      CLIENTE_ENDERECO: primaryParty.address,
       TITULAR_NOME: data.titular_nome || '',
       IMOVEL_CODIGO: data.imovel_codigo || '',
       IMOVEL_ENDERECO: data.imovel_endereco || data.imovel_localidade || '',
@@ -372,6 +391,7 @@ function apiAtualizarProcesso(token, processId, data, context) {
     var nextVersion = autProcessVersion_(process) + 1;
     var batchId = 'EDICAO-' + autUuid_();
     var incomeEvaluation = autApplyIncomeAcceptance_(process.TIPO_PROCESSO, data, user, now);
+    var primaryParty = autPrimaryProcessParty_(process.TIPO_PROCESSO, data);
     var previousDataRows = autRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', processId).filter(function(row) {
       return autNormalize_(row.ATIVO || 'SIM') !== 'NAO';
     });
@@ -388,9 +408,9 @@ function apiAtualizarProcesso(token, processId, data, context) {
     autAppendMany_('PROCESSO_DADOS', nextDataRows);
     autUpdateRow_('PROCESSOS', process._row, {
       RESPONSAVEL: data.responsavel_processo || process.RESPONSAVEL,
-      CLIENTE_NOME: data.cliente_nome || '', CLIENTE_CPF: autDigits_(data.cliente_cpf),
-      CLIENTE_RG: data.cliente_documento || '', CLIENTE_EMAIL: autNormalizeEmail_(data.cliente_email),
-      CLIENTE_CONTATO: data.cliente_contato || '', CLIENTE_ENDERECO: autAddressFromData_(data, 'cliente'),
+      CLIENTE_NOME: primaryParty.name, CLIENTE_CPF: primaryParty.cpf,
+      CLIENTE_RG: primaryParty.document, CLIENTE_EMAIL: primaryParty.email,
+      CLIENTE_CONTATO: primaryParty.contact, CLIENTE_ENDERECO: primaryParty.address,
       TITULAR_NOME: data.titular_nome || '', IMOVEL_CODIGO: data.imovel_codigo || '',
       IMOVEL_ENDERECO: data.imovel_endereco || data.imovel_localidade || '',
       DADOS_JSON: autProcessSummaryJson_(data),
