@@ -60,7 +60,11 @@
     browserCacheNamespace: 'public',
     browserCacheCleanupScheduled: false,
     documentFetches: new Map(),
+    thumbnailFetches: new Map(),
     thumbnailMisses: new Map(),
+    cloudAccessCache: new Map(),
+    cloudPreviewCircuitUntil: 0,
+    cloudPreviewFailures: 0,
     imageEncoderSupport: new Map(),
     formSchemaFetches: new Map(),
     processDraftDirty: false,
@@ -159,6 +163,9 @@
     audit:30 * 1000
   });
   const AUTO_THUMBNAIL_SOURCE_LIMIT = 4 * 1024 * 1024;
+  const CLOUD_PREVIEW_TIMEOUT_MS = 8000;
+  const CLOUD_DOCUMENT_TIMEOUT_MS = 15000;
+  const CLOUD_PREVIEW_CIRCUIT_MS = 45 * 1000;
   const SHORT_PROCESS_DRAFT_TTL_MS = 10 * 60 * 1000;
   const CUSTOMER_LOOKUP_TTL_MS = 10 * 60 * 1000;
   const CUSTOMER_LOOKUP_MISS_TTL_MS = 60 * 1000;
@@ -248,6 +255,9 @@
       state.processTabFetches.clear();
       state.formSchemaFetches.clear();
       state.processTabScroll.clear();
+      state.cloudAccessCache.clear();
+      state.cloudPreviewCircuitUntil = 0;
+      state.cloudPreviewFailures = 0;
     }
   }
 
@@ -1071,6 +1081,9 @@
     }
     state.visualThumbnailQueue.length = 0;
     state.visualThumbnailQueued.clear();
+    // Uma chamada antiga pode continuar aguardando a rede, mas não deve manter
+    // a nova galeria bloqueada como se todos os workers ainda estivessem ocupados.
+    state.visualThumbnailWorkers = 0;
     state.visualObjectUrls.forEach(url => revokeObjectUrl(url));
     state.visualObjectUrls.clear();
   }
@@ -2333,7 +2346,7 @@
         const previous = state.visualObjectUrls.get(documentId);
         if (previous) revokeObjectUrl(previous);
         state.visualObjectUrls.set(documentId, url);
-        target.innerHTML = `<img src="${esc(url)}" alt="Miniatura de ${esc(file.fileName)}" loading="lazy" decoding="async">`;
+        target.innerHTML = `<img src="${esc(url)}" alt="Miniatura de ${esc(file.fileName)}" data-thumbnail-image="${esc(documentId)}" loading="lazy" decoding="async">`;
         target.classList.remove('loading');
         card.dataset.thumbnailState = 'loaded';
         $('[data-load-visual-thumb]', card)?.classList.add('hidden');
@@ -2372,6 +2385,19 @@
 
   async function getVisualThumbnail(documentId, options = {}) {
     const identity = documentCacheIdentity(documentId);
+    if (!options.force && state.thumbnailFetches.has(identity)) {
+      return state.thumbnailFetches.get(identity);
+    }
+    const operation = resolveVisualThumbnail(documentId, options);
+    state.thumbnailFetches.set(identity, operation);
+    try { return await operation; }
+    finally {
+      if (state.thumbnailFetches.get(identity) === operation) state.thumbnailFetches.delete(identity);
+    }
+  }
+
+  async function resolveVisualThumbnail(documentId, options = {}) {
+    const identity = documentCacheIdentity(documentId);
     const miss = state.thumbnailMisses.get(identity);
     const missUntil = Number(miss?.until || miss || 0);
     if (!options.force && missUntil > Date.now()) return miss?.result || {available:false};
@@ -2395,10 +2421,10 @@
         fromCache:true
       };
     }
-    const cloudMetadata = cloudDocumentMetadata(documentId);
-    if (cloudMetadata) {
+    const cloudMetadata = cloudThumbnailMetadata(documentId);
+    if (cloudMetadata && !cloudPreviewCircuitOpen()) {
       try {
-        const access = await requestCloudAccess(documentId, 'VIEW', 'thumbnail');
+        const access = await requestCloudAccess(documentId, 'VIEW', 'thumbnail', CLOUD_PREVIEW_TIMEOUT_MS);
         const response = await fetch(access.accessUrl, {cache:'force-cache', credentials:'omit'});
         if (!response.ok) throw new Error('Miniatura da nuvem indisponível.');
         const blob = await response.blob();
@@ -2418,8 +2444,10 @@
           fromCloud:true
         };
         await browserCachePut('thumbnail', identity, blob, result);
+        cloudPreviewSucceeded();
         return result;
-      } catch (ignoreCloudThumbnail) {
+      } catch (cloudThumbnailError) {
+        cloudPreviewFailed(cloudThumbnailError);
         // A falta de uma miniatura derivada nunca bloqueia o original.
       }
     }
@@ -2468,9 +2496,11 @@
       const item = state.visualThumbnailQueue.shift();
       state.visualThumbnailWorkers += 1;
       void loadVisualThumbnail(item.documentId).finally(() => {
-        state.visualThumbnailWorkers = Math.max(0, state.visualThumbnailWorkers - 1);
-        state.visualThumbnailQueued.delete(item.documentId);
-        drainVisualThumbnailQueue();
+        if (item.loadToken === state.visualLoadToken) {
+          state.visualThumbnailWorkers = Math.max(0, state.visualThumbnailWorkers - 1);
+          state.visualThumbnailQueued.delete(item.documentId);
+          drainVisualThumbnailQueue();
+        }
       });
     }
   }
@@ -2481,6 +2511,10 @@
     if (!cards.length || !state.currentProcess?.capabilities?.download) return;
     const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
     state.visualThumbnailConcurrency = connection?.saveData || ['slow-2g','2g'].includes(String(connection?.effectiveType || '')) ? 1 : 2;
+    const eagerCards = cards.slice(0, state.visualThumbnailConcurrency);
+    eagerCards.forEach(card => enqueueVisualThumbnail(card.dataset.visualDocument));
+    const deferredCards = cards.slice(eagerCards.length);
+    if (!deferredCards.length) return;
     if ('IntersectionObserver' in window) {
       state.visualObserver = new IntersectionObserver(entries => {
         entries.filter(entry => entry.isIntersecting).forEach(entry => {
@@ -2488,10 +2522,10 @@
           enqueueVisualThumbnail(entry.target.dataset.visualDocument);
         });
       }, {root:$('#detail-modal'), rootMargin:'120px 0px'});
-      cards.forEach(card => state.visualObserver.observe(card));
+      deferredCards.forEach(card => state.visualObserver.observe(card));
       return;
     }
-    cards.slice(0, 6).forEach(card => enqueueVisualThumbnail(card.dataset.visualDocument));
+    deferredCards.slice(0, 6).forEach(card => enqueueVisualThumbnail(card.dataset.visualDocument));
   }
 
   const DETAIL_LABELS = {
@@ -3625,10 +3659,36 @@
     return mediaCloudEnabled() && metadata?.mediaStatus === 'READY' ? metadata : null;
   }
 
+  function cloudThumbnailMetadata(id) {
+    const metadata = cloudDocumentMetadata(id);
+    return metadata && String(metadata.thumbnailStatus || '').toUpperCase() === 'READY' ? metadata : null;
+  }
+
+  function cloudPreviewCircuitOpen() {
+    return Number(state.cloudPreviewCircuitUntil || 0) > Date.now();
+  }
+
+  function cloudPreviewSucceeded() {
+    state.cloudPreviewFailures = 0;
+    state.cloudPreviewCircuitUntil = 0;
+  }
+
+  function cloudPreviewFailed(error) {
+    const code = String(error?.code || '').toUpperCase();
+    // Ausência de uma derivação é um estado do documento, não uma queda do
+    // serviço. Falhas de rede/servidor abrem um circuito curto para que os
+    // próximos cartões usem o Drive sem repetir timeouts em cascata.
+    if (['MEDIA_NOT_READY','NOT_FOUND'].includes(code)) return;
+    state.cloudPreviewFailures = Number(state.cloudPreviewFailures || 0) + 1;
+    if (state.cloudPreviewFailures >= 1) {
+      state.cloudPreviewCircuitUntil = Date.now() + CLOUD_PREVIEW_CIRCUIT_MS;
+    }
+  }
+
   async function fetchCloudStoredDocument(id, onProgress, usage = 'PREVIEW') {
     const metadata = cloudDocumentMetadata(id);
-    if (!metadata) return null;
-    const access = await requestCloudAccess(id, usage, 'document');
+    if (!metadata || cloudPreviewCircuitOpen()) return null;
+    const access = await requestCloudAccess(id, usage, 'document', CLOUD_DOCUMENT_TIMEOUT_MS);
     const response = await fetch(access.accessUrl, {cache:'no-store', credentials:'omit'});
     if (!response.ok || !response.body) throw new Error('A nuvem documental não liberou o arquivo.');
     const expectedSize = Number(access.size || metadata.size || response.headers.get('content-length') || 0);
@@ -3673,11 +3733,12 @@
       fromCloud:true
     };
     await browserCachePut('document', documentCacheIdentity(id), new Blob([bytes], {type:file.mimeType}), file);
+    cloudPreviewSucceeded();
     if (onProgress) onProgress(expectedSize, expectedSize, false);
     return file;
   }
 
-  async function fetchStoredDocument(id, onProgress, usage = 'PREVIEW') {
+  async function fetchStoredDocument(id, onProgress, usage = 'PREVIEW', options = {}) {
     const identity = documentCacheIdentity(id);
     const cached = await documentFromCache(id, identity);
     if (cached) {
@@ -3691,9 +3752,27 @@
       return {...shared, bytes:shared.bytes.slice()};
     }
     const operation = (async () => {
-      const cloud = await fetchCloudStoredDocument(id, onProgress, usage);
-      if (cloud) return cloud;
-      const manifest = await api('apiPrepararDocumento', state.token, id, state.context);
+      let cloudError = null;
+      if (!options.skipCloud) {
+        try {
+          const cloud = await fetchCloudStoredDocument(id, onProgress, usage);
+          if (cloud) return cloud;
+        } catch (error) {
+          cloudError = error;
+          cloudPreviewFailed(error);
+        }
+      }
+      let manifest;
+      try {
+        manifest = await api('apiPrepararDocumento', state.token, id, state.context);
+      } catch (driveError) {
+        if (cloudError) {
+          const fallbackError = new Error(`A nuvem rápida oscilou e a cópia do Drive também não pôde ser lida. ${driveError.message || ''}`.trim());
+          fallbackError.code = driveError.code || cloudError.code || 'DOCUMENT_FILE_UNAVAILABLE';
+          throw fallbackError;
+        }
+        throw driveError;
+      }
       const manifestIdentity = documentCacheIdentity(id, manifest);
       if (manifestIdentity !== identity) {
         const manifestCached = await documentFromCache(id, manifestIdentity);
@@ -3956,18 +4035,28 @@
         } catch (ignoreThumbnail) {}
       })();
 
-      if (cloudDocumentMetadata(id)) {
-        const access = await requestCloudAccess(id, 'VIEW', 'document');
-        if (loadToken !== state.previewLoadToken) return;
-        fullFileReady = true;
-        setPreviewObjectUrl(access.accessUrl, false, false);
-        if (String(access.mimeType || metadata.mimeType || '').startsWith('image/')) {
-          $('#preview-content').innerHTML = `<img class="rotatable-preview-image" src="${esc(access.accessUrl)}" alt="Prévia de ${esc(metadata.fileName || 'documento')}" style="transform:rotate(${state.previewRotation}deg)">`;
-        } else {
-          try { await loadPdfUrl(access.accessUrl, loadToken); }
-          catch (pdfError) { if (loadToken === state.previewLoadToken) renderPdfFailure(pdfError); }
+      let cloudAttempted = false;
+      if (cloudDocumentMetadata(id) && !cloudPreviewCircuitOpen()) {
+        cloudAttempted = true;
+        try {
+          const access = await requestCloudAccess(id, 'VIEW', 'document', CLOUD_DOCUMENT_TIMEOUT_MS);
+          if (loadToken !== state.previewLoadToken) return;
+          setPreviewObjectUrl(access.accessUrl, false, false);
+          if (String(access.mimeType || metadata.mimeType || '').startsWith('image/')) {
+            $('#preview-content').innerHTML = `<img class="rotatable-preview-image" src="${esc(access.accessUrl)}" alt="Prévia de ${esc(metadata.fileName || 'documento')}" style="transform:rotate(${state.previewRotation}deg)">`;
+          } else {
+            await loadPdfUrl(access.accessUrl, loadToken);
+          }
+          fullFileReady = true;
+          cloudPreviewSucceeded();
+          return;
+        } catch (cloudError) {
+          cloudPreviewFailed(cloudError);
+          if (loadToken === state.previewLoadToken) {
+            const note = $('.pdf-preview-fallback-note span', $('#preview-content'));
+            if (note) note.textContent = 'Nuvem rápida indisponível. Abrindo a cópia segura do Drive…';
+          }
         }
-        return;
       }
 
       const file = await fetchStoredDocument(id, (completed, total) => {
@@ -3975,7 +4064,7 @@
         const note = $('.pdf-preview-fallback-note span', $('#preview-content'));
         if (note) note.textContent = `Carregando arquivo completo… ${completed}/${total}`;
         else $('#preview-content').innerHTML = `<div class="pdf-preview-loading"><span class="spinner"></span><strong>Carregando documento… ${completed}/${total}</strong></div>`;
-      });
+      }, 'PREVIEW', {skipCloud:cloudAttempted || cloudPreviewCircuitOpen()});
       if (loadToken !== state.previewLoadToken) return;
       fullFileReady = true;
       const isImage = String(file.mimeType || '').startsWith('image/');
@@ -4019,7 +4108,9 @@
       return;
     }
     cards.forEach(card => {
-      if (card.dataset.thumbnailState === 'loaded' && !card.querySelector('[data-visual-thumbnail] img')) {
+      const image = card.querySelector('[data-visual-thumbnail] img');
+      const brokenImage = image?.complete && Number(image.naturalWidth || 0) === 0;
+      if (card.dataset.thumbnailState === 'loaded' && (!image || brokenImage)) {
         delete card.dataset.thumbnailState;
       }
     });
@@ -4160,16 +4251,24 @@
     }
   }
 
-  async function requestCloudAccess(documentId, usage = 'VIEW', role = 'document') {
+  async function requestCloudAccess(documentId, usage = 'VIEW', role = 'document', timeoutMs = CLOUD_DOCUMENT_TIMEOUT_MS) {
     const action = String(usage || 'VIEW').toUpperCase() === 'DOWNLOAD' ? 'DOWNLOAD' : 'VIEW';
+    const accessKey = `${documentCacheIdentity(documentId)}|${action}|${role}`;
+    const cached = state.cloudAccessCache.get(accessKey);
+    if (cached && Number(cached.expiresAt || 0) > Date.now() + 5000) return cached.value;
+    if (cached) state.cloudAccessCache.delete(accessKey);
     const ticket = await api('apiCriarTicketMidia', state.token, documentId, action, requestId());
-    return mediaApiRequest(ticket.apiBaseUrl, '/api/v1/media/access-url', {
+    const result = await mediaApiRequest(ticket.apiBaseUrl, '/api/v1/media/access-url', {
       body: {
         ticket: ticket.ticket,
         preferOptimized: action === 'VIEW',
         role
-      }
+      },
+      timeoutMs
     });
+    const lifetime = Math.max(5, Math.min(Number(result.expiresIn || 60), 60));
+    state.cloudAccessCache.set(accessKey, {value:result, expiresAt:Date.now() + lifetime * 1000});
+    return result;
   }
 
   async function loadTusClient() {
@@ -4407,11 +4506,14 @@
     }
     widget.classList.remove('hidden');
     const active = jobs.filter(job => ['queued','uploading'].includes(job.status)).length;
+    const replicating = jobs.filter(job => job.replicaInProgress).length;
     const failed = jobs.filter(job => job.status === 'failed').length;
     const complete = jobs.filter(job => job.status === 'complete').length;
     const warnings = jobs.filter(job => job.status === 'complete' && job.warning).length;
     $('#upload-queue-summary').textContent = active
       ? `${active} em andamento · ${complete} concluído(s)`
+      : replicating
+        ? `${complete} salvo(s) · ${replicating} sincronizando na nuvem rápida`
       : failed
         ? `${failed} com falha · ${complete} concluído(s)`
         : warnings
@@ -4423,10 +4525,10 @@
         : job.status === 'uploading'
           ? `Enviando sem bloquear a tela… ${esc(job.progress || 0)}%`
           : job.status === 'complete'
-            ? esc(job.warning || job.syncMessage || 'Enviado com sucesso')
+            ? esc(job.replicaInProgress ? 'Original salvo no Drive. Criando a cópia rápida sem bloquear a tela…' : job.warning || job.syncMessage || 'Enviado com sucesso')
             : esc(job.error || 'Falha no envio');
       const extraClass = job.status === 'complete' && job.warning ? ' has-warning' : '';
-      const trailing = job.status === 'uploading'
+      const trailing = job.status === 'uploading' || job.replicaInProgress
         ? '<span class="mini-spinner"></span>'
         : job.status === 'complete'
           ? `<b title="${job.protectionPending ? 'Original no Supabase; cópia de segurança no Drive pendente' : job.warning ? 'Original no Drive; réplica rápida pendente' : 'Envio e redundância concluídos'}">${job.warning ? '!' : '✓'}</b>`
@@ -4463,6 +4565,51 @@
     }
   }
 
+  async function replicateDriveUploadInBackground(job, documentId) {
+    if (!mediaCloudEnabled() || !job.file || !documentId) {
+      job.file = null;
+      return;
+    }
+    job.replicaInProgress = true;
+    job.warning = '';
+    job.syncMessage = 'Original salvo no Drive. Criando a cópia rápida sem bloquear a tela…';
+    renderUploadQueue();
+    try {
+      job.cloudSession = null;
+      const cloudResult = await runCloudUploadJob(job, {
+        documentId,
+        requestId:`${job.attemptRequestId}:replica`
+      });
+      job.driveSyncPending = Boolean(cloudResult?.finalization?.driveSyncPending);
+      job.warning = job.driveSyncPending
+        ? 'Original protegido no Drive. A réplica rápida continua pendente e será retomada sem afetar o documento.'
+        : '';
+      job.syncMessage = job.driveSyncPending
+        ? job.warning
+        : 'Salvo no Google Drive e sincronizado com a nuvem rápida.';
+    } catch (cloudError) {
+      let synchronized = false;
+      try {
+        const status = await api('apiConsultarEstadoMidia', state.token, documentId);
+        synchronized = status?.status === 'READY' && status?.driveSupabaseSync === 'SINCRONIZADO';
+      } catch (ignoreStatusFailure) {}
+      if (synchronized) {
+        job.warning = '';
+        job.syncMessage = 'Salvo no Google Drive e sincronizado com a nuvem rápida.';
+      } else {
+        job.warning = 'Salvo com segurança no Google Drive. O Supabase oscilou; a réplica rápida ficou pendente sem bloquear o arquivo.';
+        job.syncMessage = job.warning;
+        job.cloudError = cloudError?.code || cloudError?.message || 'MEDIA_REPLICA_PENDING';
+      }
+    } finally {
+      job.replicaInProgress = false;
+      job.file = null;
+      job.cloudSession = null;
+      renderUploadQueue();
+      invalidateProcessTabCache(job.processId, ['documents']);
+    }
+  }
+
   async function runUploadJob(job) {
     job.status = 'uploading';
     job.error = '';
@@ -4486,21 +4633,8 @@
         job.syncMessage = 'Salvo com segurança no Google Drive.';
 
         if (mediaCloudEnabled()) {
-          try {
-            job.cloudSession = null;
-            const cloudResult = await runCloudUploadJob(job, {
-              documentId:result.id,
-              requestId:`${job.attemptRequestId}:replica`
-            });
-            job.driveSyncPending = Boolean(cloudResult?.finalization?.driveSyncPending);
-            job.syncMessage = job.driveSyncPending
-              ? 'Salvo no Drive. A cópia rápida na nuvem está em processamento.'
-              : 'Salvo no Google Drive e sincronizado com a nuvem rápida.';
-          } catch (cloudError) {
-            job.driveSyncPending = false;
-            job.warning = 'Salvo com segurança no Google Drive. A cópia rápida no Supabase ficou pendente e não afeta o documento.';
-            job.cloudError = cloudError?.code || cloudError?.message || 'MEDIA_REPLICA_PENDING';
-          }
+          job.replicaScheduled = true;
+          job.syncMessage = 'Salvo no Google Drive. A cópia rápida será criada em segundo plano.';
         }
       } else if (mediaCloudEnabled()) {
         if (!mediaLargeUploadConfigured()) {
@@ -4525,7 +4659,7 @@
       }
       job.status = 'complete';
       job.progress = 100;
-      job.file = null;
+      if (!job.replicaScheduled) job.file = null;
       job.cloudSession = null;
     } catch (error) {
       job.status = 'failed';
@@ -4536,6 +4670,10 @@
       renderUploadQueue();
       processUploadQueue();
       scheduleUploadRefresh(job.processId);
+      if (job.status === 'complete' && job.replicaScheduled && job.documentId) {
+        job.replicaScheduled = false;
+        setTimeout(() => void replicateDriveUploadInBackground(job, job.documentId), 0);
+      }
     }
   }
 
@@ -4575,7 +4713,7 @@
 
   function clearCompletedUploadJobs() {
     [...state.uploadJobs.entries()].forEach(([id,job]) => {
-      if (job.status === 'complete') state.uploadJobs.delete(id);
+      if (job.status === 'complete' && !job.replicaInProgress) state.uploadJobs.delete(id);
     });
     renderUploadQueue();
   }
@@ -4595,19 +4733,26 @@
     setBusy(button,true,'Preparando...');
     try {
       const cloudMetadata = cloudDocumentMetadata(id);
-      if (cloudMetadata) {
-        const access = await requestCloudAccess(id, 'DOWNLOAD', 'document');
-        const anchor = document.createElement('a');
-        anchor.href = access.accessUrl;
-        anchor.target = '_blank';
-        anchor.rel = 'noopener noreferrer';
-        anchor.download = cloudMetadata.fileName || 'documento';
-        anchor.click();
-        return;
+      let cloudAttempted = false;
+      if (cloudMetadata && !cloudPreviewCircuitOpen()) {
+        cloudAttempted = true;
+        try {
+          const access = await requestCloudAccess(id, 'DOWNLOAD', 'document', CLOUD_DOCUMENT_TIMEOUT_MS);
+          const anchor = document.createElement('a');
+          anchor.href = access.accessUrl;
+          anchor.target = '_blank';
+          anchor.rel = 'noopener noreferrer';
+          anchor.download = cloudMetadata.fileName || 'documento';
+          anchor.click();
+          cloudPreviewSucceeded();
+          return;
+        } catch (cloudError) {
+          cloudPreviewFailed(cloudError);
+        }
       }
       const file = await fetchStoredDocument(id, (completed, total) => {
         if (button?.isConnected) button.textContent = `Baixando ${completed}/${total}`;
-      }, 'DOWNLOAD');
+      }, 'DOWNLOAD', {skipCloud:cloudAttempted || cloudPreviewCircuitOpen()});
       const url = URL.createObjectURL(new Blob([file.bytes], {type:file.mimeType}));
       const a = document.createElement('a'); a.href=url; a.download=file.fileName; a.click();
       setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -4625,6 +4770,8 @@
         browserCacheDelete('document', identity),
         browserCacheDelete('thumbnail', identity)
       ]);
+      [...state.cloudAccessCache.keys()].filter(key => key.startsWith(`${identity}|`))
+        .forEach(key => state.cloudAccessCache.delete(key));
       const visualUrl = state.visualObjectUrls.get(id);
       if (visualUrl) revokeObjectUrl(visualUrl);
       state.visualObjectUrls.delete(id);
@@ -5081,6 +5228,18 @@
       else if(event.target.matches('[data-master-document]'))maskMasterDocument(event.target);
       else if(event.target.matches('#participant-form [data-mask],#proposal-form [data-mask],#customer-record-form [data-mask],#property-record-form [data-mask]'))maskValue(event.target);
     });
+    document.addEventListener('error',event=>{
+      const image=event.target?.matches?.('[data-thumbnail-image]')?event.target:null;
+      if(!image)return;
+      const card=image.closest('[data-visual-document]');
+      if(!card||card.dataset.thumbnailRecovery==='1')return;
+      card.dataset.thumbnailRecovery='1';
+      delete card.dataset.thumbnailState;
+      const id=card.dataset.visualDocument;
+      requestAnimationFrame(()=>void loadVisualThumbnail(id,{force:true}).finally(()=>{
+        if(card.isConnected)delete card.dataset.thumbnailRecovery;
+      }));
+    },true);
     document.addEventListener('dragover',event=>{const zone=event.target.closest?.('[data-document-dropzone]');if(zone){event.preventDefault();event.dataTransfer.dropEffect='copy';zone.classList.add('drag-active');}});
     document.addEventListener('dragleave',event=>{const zone=event.target.closest?.('[data-document-dropzone]');if(zone&&!zone.contains(event.relatedTarget))zone.classList.remove('drag-active');});
     document.addEventListener('drop',event=>{const zone=event.target.closest?.('[data-document-dropzone]');if(zone){event.preventDefault();zone.classList.remove('drag-active');const files=Array.from(event.dataTransfer?.files||[]);selectDocumentFiles(zone.closest('[data-document-upload]'),files,true);}});

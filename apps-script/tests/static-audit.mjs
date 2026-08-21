@@ -330,6 +330,11 @@ check('cache seguro, resistente e sem recarregar prévias ou abas', () => {
   assert.match(scriptsHtml, /const busyButton = button instanceof HTMLButtonElement \? button : null/);
   assert.match(scriptsHtml, /function restoreVisualThumbnailsAfterPreview/);
   assert.doesNotMatch(scriptsHtml, /setBusy\(button, true, 'Abrindo\.\.\.'\)/);
+  assert.match(scriptsHtml, /function cloudThumbnailMetadata/);
+  assert.match(scriptsHtml, /function cloudPreviewCircuitOpen/);
+  assert.match(scriptsHtml, /Nuvem rápida indisponível\. Abrindo a cópia segura do Drive/);
+  assert.match(scriptsHtml, /data-thumbnail-image/);
+  assert.match(scriptsHtml, /state\.thumbnailFetches\.has/);
   assert.match(scriptsHtml, /canvasToBoundedThumbnailBlob\(canvas, preferredType, 80 \* 1024\)/);
   assert.match(scriptsHtml, /maxWidth = 360/);
   assert.match(scriptsHtml, /maxHeight = 270/);
@@ -366,6 +371,8 @@ check('prévia PDF persistente possui flag, validação, auditoria e rollback se
   assert.match(serverSource, /apiReservarUploadNuvem/);
   assert.match(serverSource, /apiFinalizarUploadNuvem/);
   assert.match(scriptsHtml, /runCloudUploadJob/);
+  assert.match(scriptsHtml, /function replicateDriveUploadInBackground/);
+  assert.match(scriptsHtml, /Criando a cópia rápida sem bloquear a tela/);
   assert.match(scriptsHtml, /function mediaLargeUploadConfigured/);
   assert.match(scriptsHtml, /A cópia de segurança no Google Drive ainda está pendente; a redundância não foi concluída/);
   assert.match(scriptsHtml, /apiVerificarProntidaoUploadGrande/);
