@@ -30,6 +30,17 @@ function apiRequestBody_(event) {
   catch (err) { throw autApiError_('JSON inválido.', 'INVALID_JSON'); }
 }
 
+function autEnsureApiKeysSheet_() {
+  try { return autSheet_('API_CHAVES'); }
+  catch (err) {
+    autAssert_(err && err.code === 'SETUP_REQUIRED', err && err.message || 'Estrutura da API indisponível.', 'SETUP_REQUIRED');
+    // Compatibilidade com instalações anteriores à API: cria somente a
+    // estrutura ausente de forma idempotente, preservando todas as abas.
+    autPrepareSheets_(autDb_());
+    return autSheet_('API_CHAVES');
+  }
+}
+
 function apiKeyValue_(event, body) {
   body = body || {};
   // Header não é exposto de forma consistente pelo evento do Apps Script;
@@ -41,6 +52,7 @@ function apiKeyRow_(rawKey, requiredScope) {
   var key = String(rawKey || '').trim();
   autAssert_(/^ak_live_[A-Za-z0-9_-]{32,160}$/.test(key), 'Chave de API ausente ou inválida.', 'API_KEY_INVALID');
   var hash = autHash_(key);
+  autEnsureApiKeysSheet_();
   var row = autRows_('API_CHAVES').filter(function(item) { return String(item.CHAVE_HASH || '') === hash; })[0];
   autAssert_(row, 'Chave de API inválida.', 'API_KEY_INVALID');
   autAssert_(String(row.STATUS || '') === 'ATIVA', 'Chave de API bloqueada ou revogada.', 'API_KEY_BLOCKED');
@@ -175,6 +187,7 @@ function apiCriarChaveIntegracao(token, payload, context) {
   var lock = LockService.getScriptLock();
   try {
     var actor = autRequireAuth_(token, 'API_CHAVE_GERIR');
+    autEnsureApiKeysSheet_();
     context = context || {};
     var requestKey = autClaimRequest_(actor, 'API_CHAVE_CRIAR', context);
     payload = payload || {};
@@ -200,6 +213,7 @@ function apiCriarChaveIntegracao(token, payload, context) {
 function apiListarChavesIntegracao(token) {
   try {
     var actor = autRequireAuth_(token, 'API_CHAVE_GERIR');
+    autEnsureApiKeysSheet_();
     return autResult_({ scopes:AUTENTIKO_API_SCOPES, items:autRows_('API_CHAVES').map(function(row) { return { id:row.ID_API, name:row.NOME, prefix:row.PREFIXO, scopes:autJsonParse_(row.ESCOPO_JSON, []), status:row.STATUS, createdAt:row.CRIADO_EM, createdBy:row.CRIADO_POR, lastUsedAt:row.ULTIMO_USO_EM, expiresAt:row.EXPIRA_EM, description:row.DESCRICAO }; }) });
   } catch (err) { return autPublicError_(err); }
 }
@@ -208,6 +222,7 @@ function apiAlterarStatusChaveIntegracao(token, id, status, context) {
   var lock = LockService.getScriptLock();
   try {
     var actor = autRequireAuth_(token, 'API_CHAVE_GERIR');
+    autEnsureApiKeysSheet_();
     context = context || {};
     var requestKey = autClaimRequest_(actor, 'API_CHAVE_STATUS|' + String(id), context);
     autAssert_(['ATIVA', 'BLOQUEADA', 'REVOGADA'].indexOf(String(status)) >= 0, 'Status inválido.', 'VALIDATION_ERROR');

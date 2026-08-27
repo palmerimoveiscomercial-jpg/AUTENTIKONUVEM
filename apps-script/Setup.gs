@@ -86,7 +86,7 @@ function autPrepareSheets_(db) {
         if (sheet.getColumnWidth(col) > 320) sheet.setColumnWidth(col, 320);
       }
     }
-    if (['USUARIOS', 'SESSOES', 'TOKENS_EMAIL'].indexOf(name) >= 0) {
+    if (['USUARIOS', 'SESSOES', 'TOKENS_EMAIL', 'API_CHAVES'].indexOf(name) >= 0) {
       sheet.hideSheet();
       var protections = sheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
       if (!protections.length) sheet.protect().setDescription('Dados sensíveis — gerenciados pelo AUTENTIKO').setWarningOnly(true);
