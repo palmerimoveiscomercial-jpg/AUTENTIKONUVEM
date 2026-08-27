@@ -200,7 +200,9 @@ function apiCriarChaveIntegracao(token, payload, context) {
       autAssert_(!isNaN(expiry.getTime()) && expiry.getTime() > Date.now(), 'A expiração deve ser uma data futura válida.', 'VALIDATION_ERROR');
     }
     lock.waitLock(30000);
-    var raw = 'ak_live_' + autRandom_(64).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48);
+    var randomPart = '';
+    while (randomPart.length < 48) randomPart += autRandom_(64).replace(/[^A-Za-z0-9_-]/g, '');
+    var raw = 'ak_live_' + randomPart.slice(0, 48);
     var id = autUuid_();
     autAppend_('API_CHAVES', { ID_API:id, NOME:name, PREFIXO:raw.slice(0, 16), CHAVE_HASH:autHash_(raw), ESCOPO_JSON:JSON.stringify(scopes), STATUS:'ATIVA', CRIADO_EM:autNow_(), CRIADO_POR_ID:actor.ID_USUARIO, CRIADO_POR:actor.NOME, ULTIMO_USO_EM:'', EXPIRA_EM:payload.expiresAt || '', REVOGADO_EM:'', RATE_LIMIT_MIN:Math.min(Math.max(Number(payload.rateLimit || 60), 1), 600), DESCRICAO:String(payload.description || '').slice(0, 500) });
     autAudit_(actor, 'API_CHAVE_CRIADA', 'API', id, { nome:name, escopos:scopes }, context);
