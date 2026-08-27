@@ -26,7 +26,7 @@ check('sintaxe de todos os arquivos do servidor', () => {
   for (const name of serverFiles) {
     new vm.Script(fs.readFileSync(path.join(projectDir, name), 'utf8'), { filename: name });
   }
-  assert.equal(serverFiles.length, 12);
+  assert.equal(serverFiles.length, 13);
 });
 
 check('sintaxe do JavaScript do navegador', () => {
@@ -87,6 +87,17 @@ check('correções estruturais contra os erros observados', () => {
 check('nenhuma credencial temporária fixa no código', () => {
   assert.doesNotMatch(serverSource + scriptsHtml + indexHtml, /admin123/i);
   assert.doesNotMatch(serverSource, /bootstrapPassword\s*:\s*['"][^'"]+['"]/);
+});
+
+check('API JSON e gestão de chaves estão protegidas', () => {
+  assert.match(serverSource, /function doPost\(e\)/);
+  assert.match(serverSource, /function apiV1Request_\(event, body\)/);
+  assert.match(serverSource, /API_CHAVES/);
+  assert.match(serverSource, /API_KEY_BLOCKED/);
+  assert.match(serverSource, /AUDITORIA_CONSULTAR/);
+  assert.match(scriptsHtml, /function renderAdminApi\(\)/);
+  assert.match(scriptsHtml, /apiCriarChaveIntegracao/);
+  assert.match(indexHtml, /data-admin-tab="api"/);
 });
 
 check('limites de entrada presentes no cliente e servidor', () => {

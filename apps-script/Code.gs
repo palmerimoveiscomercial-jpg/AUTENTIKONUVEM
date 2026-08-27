@@ -1,4 +1,9 @@
 function doGet() {
+  var event = arguments[0];
+  if (event && event.parameter && (event.parameter.api || event.parameter.action)) {
+    try { return apiJsonOutput_(apiV1Request_(event, event.parameter)); }
+    catch (err) { return apiJsonOutput_({ ok: false, code: err.code || 'INTERNAL_ERROR', message: err.message || 'Não foi possível concluir a operação.' }); }
+  }
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
     .setTitle(AUTENTIKO.APP_NAME)

@@ -442,6 +442,7 @@ function apiAdminBootstrap(token, section) {
     if (autHasPermission_(actor, 'FORMULARIO_GERIR')) data.availableTabs = data.availableTabs.concat(['documents', 'fields']);
     if (autHasPermission_(actor, 'CONTRATO_MODELO_GERIR')) data.availableTabs.push('models');
     if (autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.availableTabs = data.availableTabs.concat(['settings', 'security']);
+    if (autHasPermission_(actor, 'API_CHAVE_GERIR')) data.availableTabs.push('api');
     if ((loadAll || requested === 'USERS') && autHasPermission_(actor, 'USUARIO_GERIR')) data.users = autUsersAdminData_(actor);
     if ((loadAll || requested === 'DOCUMENTS' || requested === 'FIELDS') && autHasPermission_(actor, 'FORMULARIO_GERIR')) {
       if (loadAll || requested === 'DOCUMENTS') data.documents = autDocumentsAdminData_();
@@ -453,6 +454,10 @@ function apiAdminBootstrap(token, section) {
     }
     if ((loadAll || requested === 'SETTINGS') && autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.configs = autConfigsAdminData_(actor);
     if ((loadAll || requested === 'SECURITY') && autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.security = autAdminHealthData_(actor, false);
+    if ((loadAll || requested === 'API') && autHasPermission_(actor, 'API_CHAVE_GERIR')) data.api = {
+      scopes: AUTENTIKO_API_SCOPES,
+      items: autRows_('API_CHAVES').map(function(row) { return { id: row.ID_API, name: row.NOME, prefix: row.PREFIXO, scopes: autJsonParse_(row.ESCOPO_JSON, []), status: row.STATUS, createdAt: row.CRIADO_EM, createdBy: row.CRIADO_POR, lastUsedAt: row.ULTIMO_USO_EM, expiresAt: row.EXPIRA_EM, description: row.DESCRICAO }; })
+    };
     if ((loadAll || requested === 'MODELS') && autHasPermission_(actor, 'CONTRATO_MODELO_GERIR')) {
       data.contractModels = autRows_('MODELOS_CONTRATO').map(function(row) {
         var modelVersion = Number(row.VERSAO || 1);

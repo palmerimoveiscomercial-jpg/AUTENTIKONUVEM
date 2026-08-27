@@ -4974,7 +4974,7 @@
       renderAdminSection(targetTab);
       return;
     }
-    const contentIds={users:'users-table',documents:'documents-table',fields:'fields-table',models:'contract-models-table',settings:'settings-table',security:'security-health'};
+    const contentIds={users:'users-table',documents:'documents-table',fields:'fields-table',models:'contract-models-table',settings:'settings-table',security:'security-health',api:'api-keys-table'};
     const target = $(`#${contentIds[targetTab] || ''}`);
     if (target) target.innerHTML = `<div class="empty-state">Carregando ${esc(targetTab)}...</div>`;
     try {
@@ -4988,7 +4988,7 @@
 
   function renderAdminNavigation() {
     const allowed = new Set(state.admin?.availableTabs || []);
-    const available = Object.fromEntries(['users','documents','fields','models','settings','security'].map(tab=>[tab,allowed.has(tab)]));
+    const available = Object.fromEntries(['users','documents','fields','models','settings','security','api'].map(tab=>[tab,allowed.has(tab)]));
     $$('.subtab').forEach(button => button.classList.toggle('hidden', !available[button.dataset.adminTab]));
     $$('.admin-tab').forEach(tab => tab.classList.toggle('hidden', !available[tab.id.replace('admin-', '')]));
     const active = $$('.subtab').find(button => button.classList.contains('active') && available[button.dataset.adminTab])
@@ -5004,6 +5004,55 @@
     if(tab==='models')return renderAdminModels();
     if(tab==='settings')return renderAdminSettings();
     if(tab==='security')return renderAdminSecurity();
+    if(tab==='api')return renderAdminApi();
+  }
+
+  function renderAdminApi() {
+    const block = state.admin?.api;
+    const target = $('#api-keys-table');
+    if (!target || !block) return;
+    const scopes = block.scopes || {};
+    const scopeOptions = Object.keys(scopes).map(key => `<label class="check"><input type="checkbox" name="scopes" value="${esc(key)}"> ${esc(scopes[key])}</label>`).join('');
+    const rows = (block.items || []).map(item => [
+      `<strong>${esc(item.name)}</strong><br><small>${esc(item.description || 'Sem descrição')}</small>`,
+      `<code>${esc(item.prefix)}…</code>`,
+      esc((item.scopes || []).join(', ')),
+      `<span class="status-badge ${item.status==='ATIVA'?'status-APROVADO':item.status==='REVOGADA'?'status-REPROVADO':'status-PENDENTE'}">${esc(statusText(item.status))}</span>`,
+      dateText(item.createdAt), dateText(item.lastUsedAt),
+      item.status === 'REVOGADA' ? '—' : `<div class="table-actions">${item.status==='ATIVA'?`<button class="link-btn" data-api-key-status="BLOQUEADA" data-api-key-id="${esc(item.id)}">Bloquear</button>`:`<button class="link-btn" data-api-key-status="ATIVA" data-api-key-id="${esc(item.id)}">Ativar</button>`}<button class="link-btn danger" data-api-key-status="REVOGADA" data-api-key-id="${esc(item.id)}">Revogar</button></div>`
+    ]);
+    target.innerHTML = `<div class="settings-intro"><div><strong>API JSON do AUTENTIKO</strong><p>Integrações servidor a servidor podem consultar processos por protocolo/CPF e, com escopo específico, editar. A chave é exibida uma única vez e nunca fica gravada em texto claro.</p></div><span>${(block.items || []).length} integração(ões)</span></div><form id="api-key-form" class="config-card" autocomplete="off"><div class="form-grid two"><label>Nome da integração<input name="name" minlength="3" maxlength="120" required placeholder="Ex.: Portal de parceiros"></label><label>Limite por minuto<input name="rateLimit" type="number" min="1" max="600" value="60"></label><label>Expira em (opcional)<input name="expiresAt" type="datetime-local"></label><label>Descrição<input name="description" maxlength="500" placeholder="Finalidade e responsável"></label></div><fieldset><legend>Escopos</legend><div id="api-key-scopes" class="check-grid">${scopeOptions}</div></fieldset><div class="modal-actions"><button type="submit" class="btn primary compact">Gerar chave secreta</button></div><p class="hint">A chave começa com <code>ak_live_</code>. Guarde-a no cofre de segredos da integração; o AUTENTIKO não poderá recuperá-la.</p></form>${rows.length ? table(['Nome','Prefixo','Escopos','Status','Criada em','Último uso','Ações'], rows) : '<div class="empty-state">Nenhuma chave de integração criada.</div>'}`;
+    $('#api-key-form').addEventListener('submit', submitApiKeyForm);
+  }
+
+  async function submitApiKeyForm(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = $('button[type=submit]', form);
+    const data = formObject(form);
+    data.scopes = $$('input[name="scopes"]:checked', form).map(input => input.value);
+    data.rateLimit = Number(data.rateLimit || 60);
+    if (!data.scopes.length) return toast('Escolha ao menos um escopo para a integração.', 'error');
+    setBusy(button, true, 'Gerando...');
+    try {
+      const result = await api('apiCriarChaveIntegracao', state.token, data, {...state.context, requestId: requestId()});
+      alert(`CHAVE DE API — copie agora e guarde em local seguro:\n\n${result.key}\n\nEla não será exibida novamente.`);
+      form.reset();
+      toast('Chave criada. O valor completo não será mostrado novamente.', 'success');
+      await loadAdmin('api', true);
+    } catch (error) { toast(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  }
+
+  async function changeApiKeyStatus(button) {
+    const id = button.dataset.apiKeyId;
+    const status = button.dataset.apiKeyStatus;
+    const label = status === 'REVOGADA' ? 'revogar' : status === 'BLOQUEADA' ? 'bloquear' : 'ativar';
+    if (!confirm(`Confirma ${label} esta chave de integração?`)) return;
+    setBusy(button, true, 'Salvando...');
+    try { await api('apiAlterarStatusChaveIntegracao', state.token, id, status, {...state.context, requestId: requestId()}); toast(`Chave ${status === 'ATIVA' ? 'ativada' : status === 'BLOQUEADA' ? 'bloqueada' : 'revogada'} com sucesso.`, 'success'); await loadAdmin('api', true); }
+    catch (error) { toast(error.message, 'error'); }
+    finally { if (button.isConnected) setBusy(button, false); }
   }
 
   function renderAdminUsers() {
@@ -5425,6 +5474,7 @@
       const editDoc=event.target.closest('[data-edit-doc]');if(editDoc)return openDocModal(editDoc.dataset.editDoc);
       const editField=event.target.closest('[data-edit-field]');if(editField)return openFieldModal(editField.dataset.editField);
       const editModel=event.target.closest('[data-edit-contract-model]');if(editModel)return editContractModel(editModel.dataset.editContractModel);
+      const apiKeyStatus=event.target.closest('[data-api-key-status]');if(apiKeyStatus)return changeApiKeyStatus(apiKeyStatus);
       if(event.target.closest('[data-add-contract-clause]'))return addContractClause();
       const removeClause=event.target.closest('[data-remove-contract-clause]');if(removeClause){const rows=$$('[data-contract-clause-row]');if(rows.length<=1)return toast('O modelo deve possuir ao menos uma cláusula.','error');removeClause.closest('[data-contract-clause-row]')?.remove();return;}
       const cloudHealth=event.target.closest('[data-test-cloud-health]');if(cloudHealth)return refreshAdminSecurityRemote(cloudHealth);

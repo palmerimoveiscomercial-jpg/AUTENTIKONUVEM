@@ -159,13 +159,14 @@
       <section id="admin-view" class="app-view">
         <div class="section-card">
           <div class="section-head"><div><h3>Administração</h3><p>Usuários, permissões, documentos, formulários, segurança e integridade.</p></div><button class="btn secondary compact" id="refresh-admin-btn">Atualizar aba</button></div>
-          <div class="subtabs"><button class="subtab active" data-admin-tab="users">Usuários</button><button class="subtab" data-admin-tab="documents">Documentos</button><button class="subtab" data-admin-tab="fields">Campos</button><button class="subtab" data-admin-tab="models">Modelos contratuais</button><button class="subtab" data-admin-tab="settings">Configurações</button><button class="subtab" data-admin-tab="security">Segurança e nuvem</button></div>
+          <div class="subtabs"><button class="subtab active" data-admin-tab="users">Usuários</button><button class="subtab" data-admin-tab="documents">Documentos</button><button class="subtab" data-admin-tab="fields">Campos</button><button class="subtab" data-admin-tab="models">Modelos contratuais</button><button class="subtab" data-admin-tab="settings">Configurações</button><button class="subtab" data-admin-tab="security">Segurança e nuvem</button><button class="subtab" data-admin-tab="api">API e integrações</button></div>
           <div id="admin-users" class="admin-tab active"><div class="admin-toolbar"><button class="btn primary compact" id="add-user-btn">+ Usuário</button></div><div id="users-table"></div></div>
           <div id="admin-documents" class="admin-tab"><div class="admin-toolbar"><button class="btn primary compact" id="add-doc-btn">+ Tipo de documento</button></div><div id="documents-table"></div></div>
           <div id="admin-fields" class="admin-tab"><div class="admin-toolbar"><select id="field-type-filter"></select><button class="btn primary compact" id="add-field-btn">+ Campo</button></div><div id="fields-table"></div></div>
           <div id="admin-models" class="admin-tab"><div id="contract-models-table"></div></div>
           <div id="admin-settings" class="admin-tab"><div id="settings-table"></div></div>
           <div id="admin-security" class="admin-tab"><div id="security-health"><div class="empty-state">Abra esta aba para verificar integridade, permissões e nuvem documental.</div></div></div>
+          <div id="admin-api" class="admin-tab"><div id="api-keys-table"></div></div>
         </div>
       </section>
     </section>
