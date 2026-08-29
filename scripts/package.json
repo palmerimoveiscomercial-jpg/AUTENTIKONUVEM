@@ -1,0 +1,19 @@
+{
+  "name": "@autentiko/media-maintenance",
+  "private": true,
+  "type": "module",
+  "version": "2.5.0",
+  "scripts": {
+    "migrate": "node migrate-media.mjs",
+    "reconcile": "node reconcile-media.mjs",
+    "jobs": "node process-media-jobs.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.110.8",
+    "dotenv": "^17.2.0",
+    "sharp": "0.35.3"
+  },
+  "engines": {
+    "node": ">=20.9"
+  }
+}

@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   mysql:
+    profiles: ["local-mysql"]
     image: mysql:8.0
     restart: unless-stopped
     env_file: .env
@@ -17,6 +18,7 @@ services:
       - ./db/init/mysql:/docker-entrypoint-initdb.d:ro
 
   mariadb:
+    profiles: ["local-mariadb"]
     image: mariadb:10.11
     restart: unless-stopped
     env_file: .env
@@ -32,6 +34,7 @@ services:
       - ./db/init/mariadb:/docker-entrypoint-initdb.d:ro
 
   supabase:
+    profiles: ["local-supabase"]
     # Supabase is Postgres-based. This uses the official Supabase Postgres image.
     image: supabase/postgres:15.2.0
     restart: unless-stopped

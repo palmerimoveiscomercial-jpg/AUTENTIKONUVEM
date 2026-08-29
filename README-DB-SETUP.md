@@ -16,13 +16,20 @@ Instruções rápidas
    # edite .env e altere as senhas
 
 2) Subir os serviços:
-   docker compose up -d
+   docker compose --profile local-supabase up -d
 
 3) Verificar status / logs:
    docker compose ps
    docker compose logs -f mysql
    docker compose logs -f mariadb
    docker compose logs -f supabase
+
+MySQL e MariaDB são opcionais e não participam da produção do AUTENTIKO 2.2:
+
+```bash
+docker compose --profile local-mysql up -d mysql
+docker compose --profile local-mariadb up -d mariadb
+```
 
 Acessando os bancos
 - MySQL (cliente):

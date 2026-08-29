@@ -1,0 +1,26 @@
+{
+  "regions": ["gru1"],
+  "functions": {
+    "src/app/api/v1/search/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/v1/sync/nuvem/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/v1/contracts/issue/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/v1/providers/query/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/v1/ai/analyze/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/v1/media/uploads/complete/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/v1/webhooks/adobe/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}
