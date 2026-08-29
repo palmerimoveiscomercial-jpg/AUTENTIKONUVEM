@@ -16,9 +16,25 @@ export type Env = z.infer<typeof schema>;
 
 let cached: Env | undefined;
 
+function resolvedEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    SUPABASE_URL: process.env.SUPABASE_URL || process.env.AUTENTIKO_SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY:
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.AUTENTIKO_SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.AUTENTIKO_SUPABASE_SECRET_KEY
+  };
+}
+
 export function env(): Env {
-  if (!cached) cached = schema.parse(process.env);
+  if (!cached) cached = schema.parse(resolvedEnvironment());
   return cached;
+}
+
+export function supabaseConfigured(): boolean {
+  const resolved = resolvedEnvironment();
+  return Boolean(resolved.SUPABASE_URL && resolved.SUPABASE_SERVICE_ROLE_KEY);
 }
 
 export function allowedOrigins(): Set<string> {

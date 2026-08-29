@@ -1,5 +1,6 @@
 import {NextResponse} from 'next/server';
 import {supabaseAdmin} from '../../../lib/supabase';
+import {supabaseConfigured} from '../../../lib/env';
 import {dataCloudConfigured} from '../../../lib/data-env';
 import {pingNeon} from '../../../lib/neon';
 
@@ -8,13 +9,11 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
   const deep = new URL(request.url).searchParams.get('deep') === '1';
-  const supabaseConfigured = Boolean(
-    process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
-  );
-  let database = supabaseConfigured;
+  const hasSupabase = supabaseConfigured();
+  let database = hasSupabase;
   const neonConfigured = dataCloudConfigured();
   let neon = neonConfigured;
-  if (deep && supabaseConfigured) {
+  if (deep && hasSupabase) {
     try {
       const {error} = await supabaseAdmin().from('audit_integrity_status').select('*').limit(1);
       database = !error;
@@ -35,7 +34,7 @@ export async function GET(request: Request) {
       time: new Date().toISOString(),
       database,
       supabase: {
-        configured: supabaseConfigured,
+        configured: hasSupabase,
         healthy: database
       },
       dataCloud: {
