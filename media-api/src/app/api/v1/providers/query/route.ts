@@ -8,6 +8,7 @@ import {queryBrasilApi, queryCguCeis, queryDataJud} from '../../../../../lib/pro
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 const inputSchema = z.discriminatedUnion('provider', [
   z.object({provider: z.literal('BRASIL_API'), resource: z.enum(['CEP', 'CNPJ']), value: z.string().min(1).max(40)}),

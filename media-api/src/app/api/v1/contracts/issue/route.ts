@@ -10,6 +10,7 @@ import {dataQuery} from '../../../../../lib/neon';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 type JobRow = {id: string; input_hash: string; status: string; result_contract_id: string | null};
 type ContextRow = {payload: Record<string, unknown>};

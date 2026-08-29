@@ -7,6 +7,7 @@ import {dataQuery} from '../../../../../lib/neon';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 type SyncResult = {accepted: boolean; synchronized: number};
 

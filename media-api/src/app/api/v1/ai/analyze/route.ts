@@ -8,6 +8,7 @@ import {dataQuery} from '../../../../../lib/neon';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 const requestSchema = z.object({
   requestId: z.string().trim().min(8).max(200).regex(/^[A-Za-z0-9._:@/-]+$/),

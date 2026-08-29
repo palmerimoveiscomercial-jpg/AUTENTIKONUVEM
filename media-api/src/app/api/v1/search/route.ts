@@ -7,6 +7,7 @@ import {dataQuery} from '../../../../lib/neon';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 const querySchema = z.object({
   q: z.string().trim().max(300).default(''),

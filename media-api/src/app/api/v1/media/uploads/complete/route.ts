@@ -7,6 +7,7 @@ import {signInternal, verifyInternal} from '@/lib/ticket';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export async function OPTIONS(request: NextRequest) {
   return options(request);
