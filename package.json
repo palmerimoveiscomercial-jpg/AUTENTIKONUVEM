@@ -1,7 +1,7 @@
 {
   "name": "autentiko-nuvem",
   "private": true,
-  "version": "2.5.8",
+  "version": "2.7.0",
   "workspaces": ["media-api", "scripts"],
   "scripts": {
     "build": "npm run build -w media-api",

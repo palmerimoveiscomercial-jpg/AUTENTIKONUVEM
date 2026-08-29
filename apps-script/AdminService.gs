@@ -145,6 +145,9 @@ function apiTrocarMinhaSenha(token, currentPassword, newPassword, context) {
 function apiListarConfiguracoes(token) {
   try {
     var actor = autRequireAuth_(token, 'CONFIGURACAO_GERIR');
+    // Migração preguiçosa e idempotente: adiciona novas chaves de configuração
+    // em instalações existentes assim que um administrador abre esta tela.
+    autSeedConfigurations_();
     return autResult_(autConfigsAdminData_(actor));
   } catch (err) { return autPublicError_(err); }
 }
@@ -353,6 +356,10 @@ function autAdminHealthData_(actor, includeRemote) {
     return row.MEDIA_STATUS && row.MEDIA_STATUS !== 'READY' && row.MEDIA_STATUS !== 'DRIVE_ONLY';
   }).length;
   var scriptProperties = PropertiesService.getScriptProperties();
+  var dataCloud = typeof dataCloudStatus_ === 'function' ? dataCloudStatus_() : {
+    enabled: false, apiUrlConfigured: false, apiKeyConfigured: false,
+    syncSecretConfigured: false, lastSync: null
+  };
   var baseUrl = String(configs.MEDIA_API_BASE_URL || '').replace(/\/+$/, '');
   var cloudEnabled = mediaCloudEnabled_();
   var remote = { checked: false, healthy: false, status: 0, latencyMs: 0, message: 'Teste remoto não solicitado.' };
@@ -397,6 +404,7 @@ function autAdminHealthData_(actor, includeRemote) {
       bytes: totalBytes, megabytes: Math.round(totalBytes / 1048576 * 100) / 100,
       remote: remote
     },
+    dataCloud: dataCloud,
     users: {
       total: autRows_('USUARIOS').filter(function(row) { return row.STATUS !== 'EXCLUIDO'; }).length,
       active: autRows_('USUARIOS').filter(function(row) { return row.STATUS === 'ATIVO'; }).length
@@ -436,6 +444,8 @@ function apiAdminBootstrap(token, section) {
     var actor = autRequireAuth_(token);
     var data = {};
     var requested = autNormalize_(section || '');
+    if ((requested === 'SETTINGS' || requested === 'SECURITY' || !requested) &&
+        autHasPermission_(actor, 'CONFIGURACAO_GERIR')) autSeedConfigurations_();
     var loadAll = !requested;
     data.availableTabs = [];
     if (autHasPermission_(actor, 'USUARIO_GERIR')) data.availableTabs.push('users');

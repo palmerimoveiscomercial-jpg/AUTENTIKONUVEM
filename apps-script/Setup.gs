@@ -12,6 +12,14 @@ function setupSystem() {
     autSeedWorkflowV2_();
     var developer = autSeedDeveloper_();
     var folder = autEnsureWritableRootFolder_();
+    var indexBootstrap = null;
+    if (typeof autSearchRebuildIndex_ === 'function') {
+      var lastIndex = PropertiesService.getScriptProperties().getProperty('AUT_SEARCH_LAST_REBUILD_V1');
+      if (!lastIndex) {
+        try { indexBootstrap = autSearchRebuildIndex_({ reason: 'SETUP' }); }
+        catch (indexError) { console.warn('Índice de busca será reconstruído pela administração: ' + indexError.message); }
+      }
+    }
     autEnsureOpenTrigger_();
     autEnsureMaintenanceTrigger_();
     autInvalidateCaches_();
@@ -24,6 +32,7 @@ function setupSystem() {
       developerEmail: developer.email,
       bootstrapPassword: developer.created ? developer.password : '',
       documentsFolderUrl: folder.getUrl(),
+      searchIndex: indexBootstrap,
       message: developer.created
         ? 'Sistema instalado. Guarde a senha temporária e altere-a após o primeiro acesso.'
         : 'Estrutura verificada e reparada sem alterar a senha existente.'
@@ -86,10 +95,10 @@ function autPrepareSheets_(db) {
         if (sheet.getColumnWidth(col) > 320) sheet.setColumnWidth(col, 320);
       }
     }
-    if (['USUARIOS', 'SESSOES', 'TOKENS_EMAIL', 'API_CHAVES'].indexOf(name) >= 0) {
+    if (['USUARIOS', 'SESSOES', 'TOKENS_EMAIL', 'API_CHAVES', 'BUSCA_INDICE', 'DRIVE_INDICE'].indexOf(name) >= 0) {
       sheet.hideSheet();
       var protections = sheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
-      if (!protections.length) sheet.protect().setDescription('Dados sensíveis — gerenciados pelo AUTENTIKO').setWarningOnly(true);
+      if (!protections.length) sheet.protect().setDescription(name.indexOf('INDICE') >= 0 ? 'Índice materializado — gerenciado pelo AUTENTIKO' : 'Dados sensíveis — gerenciados pelo AUTENTIKO').setWarningOnly(true);
     }
   });
 }
@@ -120,6 +129,10 @@ function autSeedConfigurations_() {
     ['MEDIA_MAX_PDF_SOURCE_MB', '100', 'DOCUMENTOS', 'NUMBER', 'Limite de entrada para PDF pesado; acima de 25 MB será otimizado em segundo plano', 'SIM'],
     ['MEDIA_LARGE_UPLOAD_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Libera arquivos acima de 6 MB somente após a redundância Drive estar operacional', 'SIM'],
     ['MEDIA_DRIVE_SYNC_WORKER_READY', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Confirmação operacional do worker Supabase para Google Drive; manter desativado até health check profundo', 'NAO'],
+    ['AUTENTIKO_OK_DOC_ENABLED', 'SIM', 'CONTRATOS', 'BOOLEAN', 'Ativa o módulo contratual determinístico integrado ao AUTENTIKO OK NUVEM', 'SIM'],
+    ['DATA_CLOUD_ENABLED', 'NAO', 'BANCO_DE_DADOS', 'BOOLEAN', 'Ativa consultas e sincronização com o índice Neon por meio da API Vercel', 'SIM'],
+    ['DATA_API_BASE_URL', '', 'BANCO_DE_DADOS', 'URL', 'URL HTTPS do backend Vercel, sem caminho final nem barra no fim', 'SIM'],
+    ['DATA_SYNC_BATCH_SIZE', '250', 'BANCO_DE_DADOS', 'NUMBER', 'Quantidade máxima de registros enviados por lote ao Neon', 'SIM'],
     ['ADOBE_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa o processamento excepcional por Adobe PDF Services', 'SIM'],
     ['ADOBE_MONTHLY_LIMIT', '500', 'DOCUMENTOS', 'NUMBER', 'Limite mensal monitorado de transações do Adobe PDF Services', 'SIM'],
     ['AUDITORIA_RETENCAO_ANOS', '10', 'AUDITORIA', 'NUMBER', 'Retenção inicial dos registros finalizados e de auditoria', 'SIM'],
@@ -165,7 +178,8 @@ function autSeedConfigurations_() {
   var blankDefaultRepairs = {
     MEDIA_PROVIDER: 'SUPABASE_EDGE',
     MEDIA_API_BASE_URL: 'https://kgcucxqtzqcsskhjfmzl.supabase.co/functions/v1/media-api',
-    ADOBE_MONTHLY_LIMIT: '500'
+    ADOBE_MONTHLY_LIMIT: '500',
+    DATA_SYNC_BATCH_SIZE: '250'
   };
   Object.keys(blankDefaultRepairs).forEach(function(key) {
     var row = existing[key];

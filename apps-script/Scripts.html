@@ -83,7 +83,16 @@
       clientTotal: 0,
       propertyTotal: 0,
       canEditClients: false,
-      canEditProperties: false
+      canEditProperties: false,
+      indexItems: [],
+      indexNextCursor: '',
+      indexTotal: 0,
+      indexOffset: 0,
+      indexQuery: '',
+      indexType: '',
+      indexCursorStack: [],
+      indexCurrentCursor: '',
+      driveIndex: null
     },
     databaseMatch: null,
     databaseLookupTimer: 0,
@@ -122,6 +131,14 @@
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? esc(value) : date.toLocaleString('pt-BR', {dateStyle:'short', timeStyle:'short'});
   };
+  const formatBytes = value => {
+    const bytes = Number(value || 0);
+    if (!bytes) return '—';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  };
   const roleText = value => ({DESENVOLVEDOR:'Desenvolvedor',ADMINISTRADOR:'Administrador',GERENTE_GERAL:'Gerente geral',GERENTE_ADMINISTRATIVO:'Gerente administrativo',ASSISTENTE_ADMINISTRATIVO:'Administrativo',AUDITOR:'Auditor',CORRETOR:'Corretor'}[value] || value);
   const statusText = value => String(value || '').replace(/_/g, ' ').toLowerCase().replace(/(^|\s)\S/g, m => m.toUpperCase());
   const hasPermission = permission => state.bootstrap?.user?.permissions?.includes('*') || state.bootstrap?.user?.permissions?.includes(permission);
@@ -144,7 +161,12 @@
     apiCriarTicketMidia: 30000,
     apiFinalizarUploadNuvem: 30000,
     apiConsultarEstadoMidia: 30000,
-    apiReprocessarMidia: 30000
+    apiReprocessarMidia: 30000,
+    apiPesquisarIndice: 30000,
+    apiMapearBaseDados: 45000,
+    apiReconstruirIndiceBusca: 180000,
+    apiPesquisarDriveIndice: 45000,
+    apiReconstruirIndiceDrive: 180000
   };
   const BROWSER_CACHE = Object.freeze({
     schemaVersion: '2.5.5',
@@ -733,8 +755,9 @@
     $('#maintenance-badge').classList.toggle('hidden', !state.bootstrap.config.MODO_MANUTENCAO);
     const admin = ['USUARIO_GERIR','FORMULARIO_GERIR','CONFIGURACAO_GERIR'].some(hasPermission);
     $('#admin-nav').classList.toggle('hidden', !admin);
-    const databaseAccess = hasPermission('BASE_CLIENTES_VER') || hasPermission('BASE_IMOVEIS_VER');
+    const databaseAccess = hasPermission('BASE_CLIENTES_VER') || hasPermission('BASE_IMOVEIS_VER') || hasPermission('PROCESSO_VER_TODOS') || hasPermission('DOCUMENTO_BAIXAR');
     $('#database-nav').classList.toggle('hidden', !databaseAccess);
+    ['#database-map-btn','#database-rebuild-btn','#drive-rebuild-btn'].forEach(selector => $(selector)?.classList.toggle('hidden', !hasPermission('CONFIGURACAO_GERIR')));
     fillGlobalSelects();
     await loadProcesses('dashboard');
     const warmPdf = () => { void loadPdfJs().catch(() => {}); };
@@ -851,7 +874,7 @@
     }
     $('#database-clients-table').innerHTML = '<div class="empty-state">Organizando cadastros em ordem alfabética...</div>';
     try {
-      const result = await api('apiPesquisarBaseClientes', state.token, {search:$('#database-client-search').value, page, pageSize:50});
+      const result = await api('apiPesquisarBaseClientes', state.token, {search:$('#database-client-search').value, page, pageSize:50, useIndex:true});
       state.database.clients = result.items || [];
       state.database.clientPage = result.page || page;
       state.database.clientTotal = result.total || 0;
@@ -882,7 +905,7 @@
     }
     $('#database-properties-table').innerHTML = '<div class="empty-state">Organizando imóveis...</div>';
     try {
-      const result = await api('apiPesquisarBaseImoveis', state.token, {search:$('#database-property-search').value, page, pageSize:50});
+      const result = await api('apiPesquisarBaseImoveis', state.token, {search:$('#database-property-search').value, page, pageSize:50, useIndex:true});
       state.database.properties = result.items || [];
       state.database.propertyPage = result.page || page;
       state.database.propertyTotal = result.total || 0;
@@ -906,15 +929,123 @@
     }
   }
 
+  function indexPageButtons(result) {
+    const previous = state.database.indexOffset > 0
+      ? `<button type="button" class="btn ghost compact" data-index-previous>← Anterior</button>` : '';
+    const next = result?.hasMore
+      ? `<button type="button" class="btn ghost compact" data-index-next="${esc(result.nextCursor || '')}">Próxima →</button>` : '';
+    if (!previous && !next) return '';
+    return `${previous}<span>Resultados ${state.database.indexOffset + 1}–${state.database.indexOffset + (result.items || []).length} de <strong>${result.total || 0}</strong></span>${next}`;
+  }
+
+  function renderIndexResults(result, isDrive = false) {
+    const items = result.items || [];
+    if (isDrive) {
+      $('#database-index-table').innerHTML = items.length ? table(
+        ['Arquivo', 'Processo', 'Tipo', 'Tamanho', 'Atualização', 'Ação'],
+        items.map(item => [
+          `<strong>${esc(item.name || 'Arquivo')}</strong><br><small>${esc(item.id)}</small>`,
+          item.protocol ? `#${esc(item.protocol)}` : '—', esc(item.mimeType || '—'),
+          esc(formatBytes(item.size || 0)), dateText(item.modifiedAt),
+          item.url ? `<a class="link-btn" href="${esc(item.url)}" target="_blank" rel="noopener">Abrir no Drive</a>` : '—'
+        ])
+      ) : '<div class="empty-state">Nenhum arquivo encontrado no índice do Drive.</div>';
+      return;
+    }
+    $('#database-index-table').innerHTML = items.length ? table(
+      ['Tipo', 'Título', 'Processo', 'Status', 'Origem', 'Atualização'],
+      items.map(item => [
+        `<span class="database-role">${esc(statusText(item.entityType))}</span>`,
+        `<strong>${esc(item.title || item.id || 'Registro')}</strong><br><small>${esc(item.id || '')}</small>`,
+        item.protocol ? `#${esc(item.protocol)}` : (item.processId ? esc(item.processId) : '—'),
+        esc(statusText(item.status || '—')),
+        `<small>${esc(item.sourceTable || '—')} · linha ${esc(item.sourceRow || '—')}</small><br><span class="index-result-hash">${esc(item.originHash || '')}</span>`,
+        dateText(item.updatedAt)
+      ])
+    ) : '<div class="empty-state">Nenhum registro encontrado. Reconstrua o índice se a base ainda não foi catalogada.</div>';
+  }
+
+  async function loadSearchIndex(cursor = '', options = {}) {
+    const canSearch = hasPermission('PROCESSO_VER_TODOS') || hasPermission('BASE_CLIENTES_VER') || hasPermission('BASE_IMOVEIS_VER') || hasPermission('DOCUMENTO_BAIXAR');
+    if (!canSearch) {
+      $('#database-index-table').innerHTML = '<div class="empty-state">Seu perfil não possui acesso à busca indexada.</div>';
+      return;
+    }
+    if (options.reset) state.database.indexCursorStack = [];
+    $('#database-index-table').innerHTML = '<div class="empty-state">Pesquisando no índice...</div>';
+    const query = $('#database-index-search').value || '';
+    const type = $('#database-index-type').value || '';
+    const isDrive = type === 'DRIVE';
+    try {
+      const result = isDrive
+        ? await api('apiPesquisarDriveIndice', state.token, {search: query, cursor, limit: 50})
+        : await api('apiPesquisarIndice', state.token, {search: query, entityTypes: type ? [type] : [], cursor, limit: 50});
+      state.database.indexItems = result.items || [];
+      state.database.indexNextCursor = result.nextCursor || '';
+      state.database.indexCurrentCursor = cursor || '';
+      state.database.indexTotal = result.total || 0;
+      state.database.indexOffset = Number(result.offset || 0);
+      state.database.indexQuery = query;
+      state.database.indexType = type;
+      if (isDrive) state.database.driveIndex = result.index || null;
+      renderIndexResults(result, isDrive);
+      const suffix = isDrive && result.index ? ` · índice Drive: ${result.index.rows || 0} arquivo(s)` : '';
+      $('#database-index-summary').innerHTML = `<strong>${result.total || 0}</strong> resultado(s) · consulta indexada em ${result.limit || 50} por página${suffix}`;
+      $('#database-index-pagination').innerHTML = indexPageButtons(result);
+    } catch (error) {
+      $('#database-index-table').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
+      $('#database-index-pagination').innerHTML = '';
+    }
+  }
+
+  async function mapDatabaseIndex() {
+    if (!hasPermission('CONFIGURACAO_GERIR')) return toast('Somente administradores podem mapear a base.', 'error');
+    const button = $('#database-map-btn'); setBusy(button, true, 'Mapeando...');
+    try {
+      const result = await api('apiMapearBaseDados', state.token);
+      const indexed = result.index?.rows || 0;
+      const sheets = (result.sheets || []).filter(item => item.rows).length;
+      $('#database-index-summary').innerHTML = `<strong>${indexed}</strong> registro(s) catalogado(s) em ${sheets} aba(s). Última reconstrução: ${esc(result.index?.lastRebuild?.at || 'ainda não executada')}.`;
+      toast('Mapeamento da base atualizado.', 'success');
+    } catch (error) { toast(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  }
+
+  async function rebuildDatabaseIndex() {
+    if (!hasPermission('CONFIGURACAO_GERIR')) return toast('Somente administradores podem reconstruir o índice.', 'error');
+    const button = $('#database-rebuild-btn'); setBusy(button, true, 'Reconstruindo...');
+    try {
+      const result = await api('apiReconstruirIndiceBusca', state.token);
+      toast(`Índice reconstruído: ${result.rows || 0} registro(s).`, 'success');
+      await loadSearchIndex('', {reset: true});
+    } catch (error) { toast(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  }
+
+  async function rebuildDriveIndex() {
+    if (!hasPermission('CONFIGURACAO_GERIR')) return toast('Somente administradores podem indexar o Drive.', 'error');
+    const button = $('#drive-rebuild-btn'); setBusy(button, true, 'Indexando...');
+    try {
+      const result = await api('apiReconstruirIndiceDrive', state.token, {maxFiles: 5000});
+      toast(`Índice do Drive atualizado: ${result.rows || 0} arquivo(s).${result.truncated ? ' O limite de segurança foi atingido; ajuste maxFiles pela API se necessário.' : ''}`, 'success');
+      $('#database-index-type').value = 'DRIVE';
+      await loadSearchIndex('', {reset: true});
+    } catch (error) { toast(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  }
+
   function setDatabaseTab(tab) {
-    state.database.tab = tab === 'properties' ? 'properties' : 'clients';
+    state.database.tab = ['properties', 'search'].includes(tab) ? tab : 'clients';
     $$('[data-database-tab]').forEach(button => button.classList.toggle('active', button.dataset.databaseTab === state.database.tab));
     $('#database-clients-panel').classList.toggle('active', state.database.tab === 'clients');
     $('#database-properties-panel').classList.toggle('active', state.database.tab === 'properties');
+    $('#database-search-panel').classList.toggle('active', state.database.tab === 'search');
   }
 
   async function loadDatabase(force = false) {
+    if (!hasPermission('BASE_CLIENTES_VER') && !hasPermission('BASE_IMOVEIS_VER') && state.database.tab === 'clients') setDatabaseTab('search');
     if (!hasPermission('BASE_CLIENTES_VER') && hasPermission('BASE_IMOVEIS_VER')) setDatabaseTab('properties');
+    if (state.database.tab === 'search') return loadSearchIndex('', {reset: force});
     if (state.database.tab === 'properties') return loadPropertyDatabase(force ? 1 : state.database.propertyPage);
     return loadCustomerDatabase(force ? 1 : state.database.clientPage);
   }
@@ -5114,22 +5245,32 @@
     if(!health)return;
     const card=(label,value,detail,status='ok')=>`<article class="health-card ${esc(status)}"><small>${esc(label)}</small><strong>${esc(value)}</strong><span>${esc(detail)}</span></article>`;
     const remote=health.media.remote||{};
+    const dataCloud=health.dataCloud||{};
     $('#security-health').innerHTML=`<div class="health-grid">
       ${card('Versão',health.versionConsistent?health.appVersion:'Inconsistente',`Instalada: ${health.installedVersion||'não informada'}`,health.versionConsistent?'ok':'danger')}
       ${card('Desenvolvedor',health.developerFullAccess?'Acesso pleno':'Inconsistente','Administra todas as funções; não pode apagar auditoria ou alterar processo finalizado.',health.developerFullAccess?'ok':'danger')}
       ${card('Auditoria',health.audit.valid&&health.audit.linear?'Íntegra':`${health.audit.failures} falha(s)`,`${health.audit.records} registros · sequência ${health.audit.lastSequence}`,health.audit.valid&&health.audit.linear?'ok':'danger')}
       ${card('Nuvem documental',health.media.enabled?'Ativa':'Desativada',`${health.media.provider} · ${health.media.megabytes} MB · ${health.media.ready}/${health.media.documents} prontos`,health.media.enabled&&health.media.apiUrlConfigured&&health.media.signingSecretConfigured?'ok':'warning')}
       ${card('Chave de assinatura',health.media.signingSecretConfigured?'Configurada':'Ausente','Segredo nunca é enviado ao navegador.',health.media.signingSecretConfigured?'ok':'warning')}
+      ${card('Neon / Vercel',dataCloud.enabled?'Ativo':'Desativado',dataCloud.apiUrlConfigured&&dataCloud.apiKeyConfigured&&dataCloud.syncSecretConfigured?'URL e segredos configurados.':'Configuração incompleta.',dataCloud.enabled&&dataCloud.apiUrlConfigured&&dataCloud.apiKeyConfigured&&dataCloud.syncSecretConfigured?'ok':'warning')}
+      ${card('Última sincronização Neon',dataCloud.lastSync?.at?dateText(dataCloud.lastSync.at):'Nunca executada',dataCloud.lastSync?.stage?`${dataCloud.lastSync.stage} · ${dataCloud.lastSync.synchronized||0} registro(s)`:'A sincronização inicial ainda é necessária.',dataCloud.lastSync?.at?'ok':'warning')}
       ${card('Âncora externa',health.audit.externalAnchorEnabled?'Ativa':'Desativada','Protege a raiz da cadeia contra adulteração silenciosa.',health.audit.externalAnchorEnabled?'ok':'warning')}
       ${card('API remota',remote.checked?(remote.healthy?'Saudável':'Falha'):'Não testada',remote.message||'Execute o teste controlado.',remote.checked?(remote.healthy?'ok':'danger'):'warning')}
       ${card('Usuários',`${health.users.active} ativos`,`${health.users.total} cadastrados`,'ok')}
-    </div><div class="health-actions"><button type="button" class="btn secondary compact" data-test-cloud-health>Testar API documental</button><button type="button" class="btn secondary compact" data-verify-audit-health>Verificar cadeia</button>${health.audit.externalAnchorEnabled?'<button type="button" class="btn primary compact" data-anchor-audit>Fixar raiz na nuvem</button>':''}</div>
+    </div><div class="health-actions"><button type="button" class="btn secondary compact" data-test-cloud-health>Testar API documental</button><button type="button" class="btn secondary compact" data-test-neon>Testar Neon</button><button type="button" class="btn secondary compact" data-sync-neon>Sincronizar Neon</button><button type="button" class="btn secondary compact" data-verify-audit-health>Verificar cadeia</button>${health.audit.externalAnchorEnabled?'<button type="button" class="btn primary compact" data-anchor-audit>Fixar raiz na nuvem</button>':''}</div>
       <form id="media-signing-secret-form" class="secret-config-form" autocomplete="off">
         <div><strong>Chave privada da nuvem documental</strong><p>${health.media.signingSecretConfigured?'A chave está configurada. Use este campo somente para uma rotação controlada.':'Configure a mesma chave privada utilizada pela API Supabase.'} O valor nunca será devolvido ao navegador.</p></div>
         <label><span>Nova chave de assinatura</span><input name="secret" type="password" minlength="64" maxlength="256" pattern="[A-Za-z0-9_-]+" autocomplete="new-password" required></label>
         <button class="btn primary compact">${health.media.signingSecretConfigured?'Rotacionar chave':'Salvar chave privada'}</button>
+      </form>
+      <form id="data-cloud-secret-form" class="secret-config-form" autocomplete="off">
+        <div><strong>Segredos privados do Neon/Vercel</strong><p>Use exatamente os mesmos valores definidos em AUT_DATA_API_KEY e AUT_DATA_SYNC_SECRET no Vercel. Campos vazios preservam o valor atual.</p></div>
+        <label><span>Chave da API</span><input name="apiKey" type="password" minlength="32" maxlength="256" autocomplete="new-password" placeholder="${dataCloud.apiKeyConfigured?'Configurada — deixe vazio para manter':'Mínimo de 32 caracteres'}"></label>
+        <label><span>Segredo de sincronização</span><input name="syncSecret" type="password" minlength="32" maxlength="256" autocomplete="new-password" placeholder="${dataCloud.syncSecretConfigured?'Configurado — deixe vazio para manter':'Mínimo de 32 caracteres'}"></label>
+        <button class="btn primary compact">Salvar segredos Neon</button>
       </form>`;
     $('#media-signing-secret-form').addEventListener('submit',submitMediaSigningSecret);
+    $('#data-cloud-secret-form').addEventListener('submit',submitDataCloudSecrets);
   }
 
   async function submitMediaSigningSecret(event) {
@@ -5143,6 +5284,43 @@
       form.reset();
       toast('Chave privada configurada sem exposição no navegador.','success');
       await loadAdmin('security',true);
+    }catch(error){toast(error.message,'error');}
+    finally{if(button.isConnected)setBusy(button,false);}
+  }
+
+  async function submitDataCloudSecrets(event) {
+    event.preventDefault();
+    const form=event.currentTarget;
+    const button=form.querySelector('button[type="submit"],button:not([type])');
+    const payload={apiKey:formControl(form,'apiKey').value.trim(),syncSecret:formControl(form,'syncSecret').value.trim()};
+    if(!payload.apiKey&&!payload.syncSecret)return toast('Informe ao menos um segredo para atualizar.','error');
+    setBusy(button,true,'Salvando...');
+    try{
+      await api('apiAdminSalvarSegredosDados',state.token,payload,{...state.context,requestId:requestId()});
+      form.reset();toast('Segredos Neon/Vercel configurados sem exposição.','success');await loadAdmin('security',true);
+    }catch(error){toast(error.message,'error');}
+    finally{if(button.isConnected)setBusy(button,false);}
+  }
+
+  async function testNeon(button) {
+    setBusy(button,true,'Testando...');
+    try{const result=await api('apiDiagnosticarNeon',state.token);toast(result.healthy?`Neon respondeu em ${result.latencyMs} ms.`:'O backend respondeu, mas o Neon não está saudável.',result.healthy?'success':'error');await loadAdmin('security',true);}
+    catch(error){toast(error.message,'error');}
+    finally{if(button.isConnected)setBusy(button,false);}
+  }
+
+  async function syncNeon(button) {
+    if(!confirm('Sincronizar o índice, o catálogo do Drive e os contextos contratuais com o Neon?'))return;
+    setBusy(button,true,'Sincronizando...');
+    let cursor='';let total=0;let batches=0;
+    try{
+      do{
+        const result=await api('apiSincronizarNeon',state.token,{cursor,limit:250},{...state.context,requestId:requestId()});
+        total+=Number(result.synchronized||0);batches+=1;cursor=result.nextCursor||'';
+        button.textContent=`${total} sincronizados...`;
+        if(batches>=100)throw new Error('A sincronização excedeu 100 lotes; execute novamente para continuar.');
+      }while(cursor);
+      toast(`${total} registro(s) sincronizado(s) com o Neon.`,'success');await loadAdmin('security',true);
     }catch(error){toast(error.message,'error');}
     finally{if(button.isConnected)setBusy(button,false);}
   }
@@ -5324,7 +5502,13 @@
     $('#refresh-database-btn').addEventListener('click',()=>loadDatabase(true));
     $('#database-client-search-btn').addEventListener('click',()=>loadCustomerDatabase(1));
     $('#database-property-search-btn').addEventListener('click',()=>loadPropertyDatabase(1));
+    $('#database-index-search-btn').addEventListener('click',()=>loadSearchIndex('',{reset:true}));
+    $('#database-map-btn').addEventListener('click',mapDatabaseIndex);
+    $('#database-rebuild-btn').addEventListener('click',rebuildDatabaseIndex);
+    $('#drive-rebuild-btn').addEventListener('click',rebuildDriveIndex);
+    $('#database-index-type').addEventListener('change',()=>loadSearchIndex('',{reset:true}));
     ['database-client-search','database-property-search'].forEach(id=>$('#'+id).addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();id==='database-client-search'?loadCustomerDatabase(1):loadPropertyDatabase(1);}}));
+    $('#database-index-search').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();loadSearchIndex('',{reset:true});}});
     $$('.js-close-modal').forEach(btn=>btn.addEventListener('click',()=>closeModal()));
     $('[data-cancel-process-form]')?.addEventListener('click',cancelProcessForm);
     $('#modal-backdrop').addEventListener('click',event=>{if(event.target===event.currentTarget)toast('Esta janela não fecha ao clicar fora. Use o botão × ou Cancelar para não perder seu trabalho.');});
@@ -5403,6 +5587,8 @@
     document.addEventListener('click',async event=>{
       const databaseTab=event.target.closest('[data-database-tab]');if(databaseTab){setDatabaseTab(databaseTab.dataset.databaseTab);return loadDatabase();}
       const databasePage=event.target.closest('[data-database-page]');if(databasePage){const page=Number(databasePage.dataset.databasePage||1);return databasePage.dataset.databasePageKind==='properties'?loadPropertyDatabase(page):loadCustomerDatabase(page);}
+      if(event.target.closest('[data-index-next]')){state.database.indexCursorStack.push(state.database.indexCurrentCursor);return loadSearchIndex(event.target.closest('[data-index-next]').dataset.indexNext);}
+      if(event.target.closest('[data-index-previous]')){const previousCursor=state.database.indexCursorStack.pop()||'';return loadSearchIndex(previousCursor,{reset:false});}
       const customerRecord=event.target.closest('[data-customer-record]');if(customerRecord)return openCustomerRecord(customerRecord.dataset.customerRecord);
       const propertyRecord=event.target.closest('[data-property-record]');if(propertyRecord)return openPropertyRecord(propertyRecord.dataset.propertyRecord);
       if(event.target.closest('[data-decline-database-match]'))return closeDatabaseMatch();
@@ -5478,6 +5664,8 @@
       if(event.target.closest('[data-add-contract-clause]'))return addContractClause();
       const removeClause=event.target.closest('[data-remove-contract-clause]');if(removeClause){const rows=$$('[data-contract-clause-row]');if(rows.length<=1)return toast('O modelo deve possuir ao menos uma cláusula.','error');removeClause.closest('[data-contract-clause-row]')?.remove();return;}
       const cloudHealth=event.target.closest('[data-test-cloud-health]');if(cloudHealth)return refreshAdminSecurityRemote(cloudHealth);
+      const neonHealth=event.target.closest('[data-test-neon]');if(neonHealth)return testNeon(neonHealth);
+      const neonSync=event.target.closest('[data-sync-neon]');if(neonSync)return syncNeon(neonSync);
       const auditHealth=event.target.closest('[data-verify-audit-health]');if(auditHealth){setBusy(auditHealth,true,'Verificando...');try{const result=await api('apiVerificarIntegridadeAuditoria',state.token);toast(result.valid?'Cadeia de auditoria íntegra.':'Falha na cadeia de auditoria.',result.valid?'success':'error');await loadAdmin('security',true);}catch(error){toast(error.message,'error');}finally{if(auditHealth.isConnected)setBusy(auditHealth,false);}return;}
       const anchorAudit=event.target.closest('[data-anchor-audit]');if(anchorAudit){setBusy(anchorAudit,true,'Ancorando...');try{await api('apiAncorarAuditoria',state.token,requestId());toast('Raiz da auditoria fixada na nuvem.','success');await loadAdmin('security',true);}catch(error){toast(error.message,'error');}finally{if(anchorAudit.isConnected)setBusy(anchorAudit,false);}return;}
     });

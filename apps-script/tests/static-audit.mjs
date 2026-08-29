@@ -26,7 +26,16 @@ check('sintaxe de todos os arquivos do servidor', () => {
   for (const name of serverFiles) {
     new vm.Script(fs.readFileSync(path.join(projectDir, name), 'utf8'), { filename: name });
   }
-  assert.equal(serverFiles.length, 13);
+  assert.equal(serverFiles.length, 15);
+});
+
+check('ponte Vercel e Neon não expõe credenciais no navegador', () => {
+  assert.match(serverSource, /function apiSincronizarNeon\(/);
+  assert.match(serverSource, /computeHmacSha256Signature/);
+  assert.match(serverSource, /AUT_DATA_SYNC_SECRET/);
+  assert.match(serverSource, /AUT_DATA_API_KEY/);
+  assert.doesNotMatch(scriptsHtml, /DATABASE_URL/);
+  assert.doesNotMatch(indexHtml, /DATABASE_URL/);
 });
 
 check('sintaxe do JavaScript do navegador', () => {

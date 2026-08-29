@@ -19,5 +19,5 @@ export function publicError(error: unknown): {status: number; body: Record<strin
     type: error instanceof Error ? error.name : typeof error,
     message: error instanceof Error ? error.message.slice(0, 240) : 'unknown'
   });
-  return {status: 500, body: {ok: false, code: 'INTERNAL_ERROR', message: 'Não foi possível concluir a operação de mídia.'}};
+  return {status: 500, body: {ok: false, code: 'INTERNAL_ERROR', message: 'Não foi possível concluir a operação solicitada.'}};
 }

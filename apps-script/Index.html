@@ -140,7 +140,7 @@
       <section id="database-view" class="app-view">
         <div class="section-card database-card">
           <div class="section-head"><div><h3>Data Base — Carta de Clientes</h3><p>Cadastros mestres deduplicados, imóveis e origem auditável em processos.</p></div><button class="btn secondary compact" id="refresh-database-btn">Atualizar</button></div>
-          <div class="database-tabs"><button type="button" class="active" data-database-tab="clients">Carta de clientes</button><button type="button" data-database-tab="properties">Base de imóveis</button></div>
+          <div class="database-tabs"><button type="button" class="active" data-database-tab="clients">Carta de clientes</button><button type="button" data-database-tab="properties">Base de imóveis</button><button type="button" data-database-tab="search">Busca indexada</button></div>
           <div id="database-clients-panel" class="database-panel active">
             <div class="database-toolbar"><div class="smart-search"><span>⌕</span><input id="database-client-search" placeholder="Pesquisar por nome, CPF/CNPJ, telefone, e-mail, papel ou ID"></div><button class="btn primary compact" id="database-client-search-btn">Pesquisar</button></div>
             <div id="database-client-summary" class="database-summary"></div>
@@ -152,6 +152,12 @@
             <div id="database-property-summary" class="database-summary"></div>
             <div id="database-properties-table"><div class="empty-state">Abra esta aba para consultar os imóveis cadastrados.</div></div>
             <div id="database-properties-pagination" class="database-pagination"></div>
+          </div>
+          <div id="database-search-panel" class="database-panel">
+            <div class="database-toolbar"><div class="smart-search"><span>⌕</span><input id="database-index-search" placeholder="Buscar em processos, clientes, imóveis e documentos"></div><select id="database-index-type"><option value="">Todos os dados</option><option value="PROCESSO">Processos</option><option value="CLIENTE">Clientes</option><option value="IMOVEL">Imóveis</option><option value="DOCUMENTO">Documentos</option><option value="PARTICIPANTE">Participantes</option><option value="PROPOSTA">Propostas</option><option value="CONTRATO">Contratos</option><option value="DRIVE">Arquivos do Drive</option></select><button class="btn primary compact" id="database-index-search-btn">Pesquisar</button></div>
+            <div class="database-toolbar index-admin-toolbar"><span id="database-index-summary" class="database-summary">O índice acelera pesquisas sem carregar todas as abas.</span><span class="toolbar-spacer"></span><button class="btn ghost compact" id="database-map-btn">Mapear base</button><button class="btn secondary compact" id="database-rebuild-btn">Reconstruir índice</button><button class="btn secondary compact" id="drive-rebuild-btn">Indexar Drive</button></div>
+            <div id="database-index-table"><div class="empty-state">Digite um termo para pesquisar no catálogo.</div></div>
+            <div id="database-index-pagination" class="database-pagination"></div>
           </div>
         </div>
       </section>

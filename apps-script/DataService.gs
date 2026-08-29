@@ -145,6 +145,7 @@ function autAppend_(name, obj) {
       autMasterInvalidateLookupCache_(obj.TIPO_PESSOA, obj.CPF_CNPJ);
     }
     sheet.getRange(rowNumber, 1, 1, headers.length).setValues([row]);
+    if (typeof autSearchIncremental_ === 'function') autSearchIncremental_(name, rowNumber);
     return rowNumber;
   });
 }
@@ -157,7 +158,11 @@ function autAppendMany_(name, objects) {
     var values = objects.map(function(obj) {
       return headers.map(function(header) { return autSafeCell_(obj[header]); });
     });
-    sheet.getRange(sheet.getLastRow() + 1, 1, values.length, headers.length).setValues(values);
+    var startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, values.length, headers.length).setValues(values);
+    if (typeof autSearchIncremental_ === 'function') {
+      for (var index = 0; index < values.length; index++) autSearchIncremental_(name, startRow + index);
+    }
   });
 }
 
@@ -175,6 +180,7 @@ function autUpdateRow_(name, rowNumber, patch) {
       if (Object.prototype.hasOwnProperty.call(patch, header)) row[index] = autSafeCell_(patch[header]);
     });
     range.setValues([row]);
+    if (typeof autSearchIncremental_ === 'function') autSearchIncremental_(name, rowNumber);
   });
 }
 
@@ -210,6 +216,9 @@ function autPatchRows_(name, rowNumbers, patch) {
         });
       });
       range.setValues(values);
+      if (typeof autSearchIncremental_ === 'function') {
+        for (var rowOffset = 0; rowOffset < values.length; rowOffset++) autSearchIncremental_(name, group.start + rowOffset);
+      }
     });
   });
 }
@@ -235,6 +244,13 @@ function autDeleteRowNumbers_(name, rowNumbers) {
   return autWithScriptLock_(function() {
     var sheet = autSheet_(name);
     var numbers = rowNumbers.slice().sort(function(a, b) { return a - b; });
+    var indexedRows = [];
+    if (typeof autSearchSource_ === 'function' && autSearchSource_(name)) {
+      numbers.forEach(function(rowNumber) {
+        var sourceRow = autRowAt_(name, rowNumber);
+        if (sourceRow) indexedRows.push({ rowNumber: rowNumber, id: sourceRow[autSearchSource_(name).id] });
+      });
+    }
     var groups = [];
     var start = numbers[0];
     var end = start;
@@ -244,6 +260,7 @@ function autDeleteRowNumbers_(name, rowNumbers) {
     }
     groups.push({ start: start, count: end - start + 1 });
     groups.sort(function(a, b) { return b.start - a.start; }).forEach(function(group) { sheet.deleteRows(group.start, group.count); });
+    if (typeof autSearchRemoveIncremental_ === 'function' && indexedRows.length) autSearchRemoveIncremental_(name, indexedRows);
   });
 }
 

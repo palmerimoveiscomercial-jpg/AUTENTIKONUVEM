@@ -431,7 +431,7 @@ const context = vm.createContext({
   MimeType: { PDF: 'application/pdf' }
 });
 
-const order = ['Config.gs', 'Utils.gs', 'DataService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'MediaService.gs', 'AdminService.gs', 'ApiService.gs', 'Setup.gs', 'Code.gs'];
+const order = ['Config.gs', 'Utils.gs', 'DataService.gs', 'SearchService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'MediaService.gs', 'AdminService.gs', 'ApiService.gs', 'Setup.gs', 'Code.gs'];
 for (const name of order) {
   const source = fs.readFileSync(path.join(projectDir, name), 'utf8');
   new vm.Script(source, { filename: name }).runInContext(context);
@@ -452,7 +452,7 @@ let setup;
 check('instalação completa', () => {
   setup = context.setupSystem();
   assert.equal(setup.ok, true);
-  assert.equal(setup.sheets.length, 27);
+  assert.equal(setup.sheets.length, 29);
   assert.equal(typeof setup.bootstrapPassword, 'string');
   assert.ok(setup.bootstrapPassword.length >= 12);
   assert.equal(context.autConfigMap_().PDF_PREVIEW_ENABLED, true);
@@ -524,7 +524,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, 683);
-  assert.equal(diagnostic.codeVersion, '2.5.8');
+  assert.equal(diagnostic.codeVersion, '2.7.0');
   assert.ok(diagnostic.maxFormCacheBytes < 15_000);
 });
 
@@ -558,7 +558,10 @@ check('login com senha temporária gerada', () => {
 let integrationApiKey;
 check('API JSON cria chave sem armazenar segredo em claro', () => {
   const created = data(context.apiCriarChaveIntegracao(token, {
-    name: 'Smoke API', scopes: ['PROCESSO_CONSULTAR', 'CADASTRO_CONSULTAR', 'AUDITORIA_CONSULTAR'], rateLimit: 60
+    name: 'Smoke API', scopes: [
+      'AUTH_BRIDGE', 'PROCESSO_CONSULTAR', 'PROCESSO_DADOS_CONSULTAR',
+      'CONTRATO_CONTEXTO_CONSULTAR', 'CADASTRO_CONSULTAR', 'AUDITORIA_CONSULTAR'
+    ], rateLimit: 60
   }, { requestId: 'smoke-api-key-001' }));
   integrationApiKey = created.key;
   assert.match(integrationApiKey, /^ak_live_[A-Za-z0-9_-]{32,160}$/);
@@ -623,6 +626,18 @@ check('criação, listagem e detalhe do processo', () => {
   assert.ok(detail.requiredDocuments.some((doc) => doc.name === 'RG/CNH' && doc.required && doc.multiple));
 });
 
+check('índice materializado, filtros e cursor mantêm resposta JSON estável', () => {
+  const process = context.autFind_('PROCESSOS', 'ID_PROCESSO', processId);
+  const first = data(context.apiPesquisarIndice(token, { search: process.PROTOCOLO, entityTypes: ['PROCESSO'], limit: 1 }));
+  assert.equal(first.total, 1);
+  assert.equal(first.items[0].protocol, process.PROTOCOLO);
+  assert.equal(first.indexVersion, '1');
+  assert.equal(context.apiPesquisarIndice(token, { cursor: 'cursor-invalido' }).code, 'INVALID_CURSOR');
+  const map = data(context.apiMapearBaseDados(token));
+  assert.ok(map.sheets.some((sheet) => sheet.name === 'BUSCA_INDICE' && sheet.searchable === false));
+  assert.ok(map.index.rows >= 1);
+});
+
 check('consulta externa por protocolo e auditoria', () => {
   const process = context.autFind_('PROCESSOS', 'ID_PROCESSO', processId);
   const result = context.apiV1Request_({ parameter: {} }, { apiKey: integrationApiKey, action: 'consultar_processo', protocol: process.PROTOCOLO });
@@ -631,6 +646,24 @@ check('consulta externa por protocolo e auditoria', () => {
   const audit = context.apiV1Request_({ parameter: {} }, { apiKey: integrationApiKey, action: 'consultar_auditoria', protocol: process.PROTOCOLO });
   assert.equal(audit.ok, true);
   assert.ok(Array.isArray(audit.data.items));
+});
+
+check('ponte pública valida a mesma sessão e entrega contexto contratual autorizado', () => {
+  const validated = context.apiV1Request_({ parameter: {} }, {
+    apiKey: integrationApiKey, action: 'auth_validate_session', sessionToken: token
+  });
+  assert.equal(validated.ok, true);
+  assert.equal(validated.data.user.email, 'palmer.imoveis.comercial@gmail.com');
+  const process = context.autFind_('PROCESSOS', 'ID_PROCESSO', processId);
+  const contractContext = context.apiV1Request_({ parameter: {} }, {
+    apiKey: integrationApiKey, action: 'consultar_contrato_contexto',
+    sessionToken: token, protocol: process.PROTOCOLO, requestId: 'smoke-contract-context-001'
+  });
+  assert.equal(contractContext.ok, true);
+  assert.equal(contractContext.data.process.id, processId);
+  assert.equal(contractContext.data.source.app, 'AUTENTIKO OK NUVEM');
+  assert.ok(Array.isArray(contractContext.data.participants));
+  assert.ok(Array.isArray(contractContext.data.documents));
 });
 
 check('Carta de Clientes deduplica CPF, permite busca e edição autorizada', () => {

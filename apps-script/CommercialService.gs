@@ -1412,6 +1412,14 @@ function apiPesquisarBaseClientes(token, filters) {
   try {
     var actor = autRequireAuth_(token, 'BASE_CLIENTES_VER');
     filters = filters || {};
+    if (typeof autSearchIndexReady_ === 'function' && autSearchIndexReady_() && filters.useIndex !== false) {
+      var indexed = autSearchMasterPage_(actor, 'CLIENTE', filters);
+      return autResult_({
+        items: indexed.rows.map(function(row) { return autMasterClientPublic_(row, false); }),
+        page: indexed.page, pageSize: indexed.pageSize, total: indexed.total,
+        canEdit: autMasterBaseEditor_(actor, 'BASE_CLIENTES_EDITAR'), indexed: true
+      });
+    }
     var rawSearch = String(filters.search || '').slice(0, 200);
     var search = autNormalize_(rawSearch);
     var searchDigits = /^[\d.\-\/\s]+$/.test(rawSearch) ? autDigits_(rawSearch) : '';
@@ -1543,6 +1551,14 @@ function apiPesquisarBaseImoveis(token, filters) {
   try {
     var actor = autRequireAuth_(token, 'BASE_IMOVEIS_VER');
     filters = filters || {};
+    if (typeof autSearchIndexReady_ === 'function' && autSearchIndexReady_() && filters.useIndex !== false) {
+      var indexed = autSearchMasterPage_(actor, 'IMOVEL', filters);
+      return autResult_({
+        items: indexed.rows.map(function(row) { return autMasterPropertyPublic_(row, false); }),
+        page: indexed.page, pageSize: indexed.pageSize, total: indexed.total,
+        canEdit: autMasterBaseEditor_(actor, 'BASE_IMOVEIS_EDITAR'), indexed: true
+      });
+    }
     var search = autNormalize_(String(filters.search || '')).slice(0, 200);
     var tokens = search.split(/\s+/).filter(Boolean);
     var rows = autRows_('BASE_IMOVEIS').filter(function(row) {
