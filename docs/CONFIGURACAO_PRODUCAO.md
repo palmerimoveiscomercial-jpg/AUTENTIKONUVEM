@@ -1,6 +1,6 @@
 # Configuração de produção — AUTENTIKO OK NUVEM
 
-Data da verificação: 28/08/2026
+Data da verificação: 29/08/2026
 
 ## Recursos confirmados
 
@@ -19,12 +19,12 @@ Data da verificação: 28/08/2026
 
 - O JWKS do Neon Auth responde JSON com HTTP 200.
 - A Neon Data API exige um JWT válido, como esperado para uma API protegida.
-- `https://autentikonuvem.vercel.app/api/health` responde 404: o domínio ainda
-  não está associado a uma implantação de produção válida.
-- A implantação de preview informada está protegida pelo Vercel Authentication
-  e não pode ser usada pelo Apps Script como API pública server-to-server.
-- O código atualizado está em um branch local 12 commits à frente do `main`
-  remoto, além das mudanças 2.7.0 ainda não publicadas no GitHub.
+- O projeto Vercel está com `Root Directory = media-api` e `Framework = Next.js`.
+- A implantação de produção responde JSON em `/api/health` e `/api/health?deep=1`.
+- As migrações do Neon e do Supabase foram aplicadas; o health check profundo valida
+  as conexões e os objetos necessários para mídia, auditoria e contratos.
+- As chaves server-side do Supabase são mantidas somente na Vercel; a chave
+  `sb_publishable_...` continua restrita ao uso público.
 
 ## Variáveis obrigatórias no Vercel
 
