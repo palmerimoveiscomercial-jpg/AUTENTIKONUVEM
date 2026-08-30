@@ -23,15 +23,22 @@ function safeJsonParse(raw: string): Record<string, unknown> {
 }
 
 async function postJson(url: string, headers: Record<string, string>, body: unknown): Promise<Record<string, unknown>> {
-  const response = await fetch(url, {
-    method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json', ...headers},
-    body: JSON.stringify(body), signal: AbortSignal.timeout(45_000), cache: 'no-store'
-  }).catch((error) => {
-    if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-      throw new ApiError(504, 'AI_TIMEOUT', 'O provedor de IA excedeu o tempo de resposta.');
-    }
-    throw new ApiError(502, 'AI_UNAVAILABLE', 'Não foi possível alcançar o provedor de IA.');
-  });
+  let response: Response | null = null;
+  const retryable = new Set([429, 500, 502, 503, 504]);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    response = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json', ...headers},
+      body: JSON.stringify(body), signal: AbortSignal.timeout(45_000), cache: 'no-store'
+    }).catch((error) => {
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+        throw new ApiError(504, 'AI_TIMEOUT', 'O provedor de IA excedeu o tempo de resposta.');
+      }
+      throw new ApiError(502, 'AI_UNAVAILABLE', 'Não foi possível alcançar o provedor de IA.');
+    });
+    if (!retryable.has(response.status) || attempt === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 700 : 1_800));
+  }
+  if (!response) throw new ApiError(502, 'AI_UNAVAILABLE', 'Não foi possível alcançar o provedor de IA.');
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.toLowerCase().includes('application/json')) {
     throw new ApiError(502, 'AI_INVALID_RESPONSE', 'O provedor de IA não devolveu JSON.');
@@ -69,16 +76,31 @@ export async function analyzeWithAi(provider: AiProvider, facts: Record<string, 
   if (provider === 'GEMINI') {
     const apiKey = process.env.GEMINI_API_KEY || '';
     if (!apiKey) throw new ApiError(503, 'GEMINI_NOT_CONFIGURED', 'A chave Gemini ainda não foi configurada no Vercel.');
-    const model = process.env.GEMINI_MODEL || 'gemini-flash-latest';
-    const result = await postJson(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {'X-Goog-Api-Key': apiKey},
-      {
-        systemInstruction: {parts: [{text: SYSTEM_INSTRUCTION}]},
-        contents: [{role: 'user', parts: [{text: prompt}]}],
-        generationConfig: {responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 4096}
+    const configuredModel = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest';
+    const models = [...new Set([configuredModel, 'gemini-flash-lite-latest'])];
+    let model = configuredModel;
+    let result: Record<string, unknown> | null = null;
+    let lastError: unknown = null;
+    for (const candidateModel of models) {
+      model = candidateModel;
+      try {
+        result = await postJson(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+          {'X-Goog-Api-Key': apiKey},
+          {
+            systemInstruction: {parts: [{text: SYSTEM_INSTRUCTION}]},
+            contents: [{role: 'user', parts: [{text: prompt}]}],
+            generationConfig: {responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 4096}
+          }
+        );
+        break;
+      } catch (error) {
+        lastError = error;
+        const fallbackAllowed = error instanceof ApiError && ['AI_PROVIDER_ERROR', 'AI_RATE_LIMIT', 'AI_UNAVAILABLE'].includes(error.code);
+        if (!fallbackAllowed || candidateModel === models[models.length - 1]) throw error;
       }
-    );
+    }
+    if (!result) throw lastError || new ApiError(502, 'AI_UNAVAILABLE', 'O Gemini não devolveu uma resposta.');
     const candidates = Array.isArray(result.candidates) ? result.candidates as Array<Record<string, unknown>> : [];
     const content = candidates[0]?.content && typeof candidates[0].content === 'object' ? candidates[0].content as Record<string, unknown> : {};
     const parts = Array.isArray(content.parts) ? content.parts as Array<Record<string, unknown>> : [];
