@@ -26,7 +26,25 @@ check('sintaxe de todos os arquivos do servidor', () => {
   for (const name of serverFiles) {
     new vm.Script(fs.readFileSync(path.join(projectDir, name), 'utf8'), { filename: name });
   }
-  assert.equal(serverFiles.length, 15);
+  assert.ok(serverFiles.length >= 17);
+});
+
+check('schema canônico e migração paginada permanecem protegidos no servidor', () => {
+  assert.match(serverSource, /var SCHEMA = Object\.freeze/);
+  assert.match(serverSource, /function AUTENTIKO_MIGRAR_BASE_PARA_DATABASE\(/);
+  assert.match(serverSource, /\/api\/v1\/migrations\/sheets/);
+  assert.match(serverSource, /REMOTE_BACKEND_ENABLED/);
+  assert.match(serverSource, /NEON_WRITE_ENABLED/);
+  assert.doesNotMatch(scriptsHtml, /CLOUDINARY_API_SECRET\s*=/);
+});
+
+check('formulário completo preserva estado nulo e índices de campo', () => {
+  assert.match(serverSource, /CODIGO_INDICE/);
+  assert.match(serverSource, /ESTADO_CAMPO/);
+  assert.match(serverSource, /NAO_INFORMADO/);
+  assert.match(scriptsHtml, /data-not-informed/);
+  assert.match(scriptsHtml, /data-multi-value/);
+  assert.match(scriptsHtml, /data-uppercase/);
 });
 
 check('ponte Vercel e Neon não expõe credenciais no navegador', () => {

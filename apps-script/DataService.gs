@@ -306,8 +306,8 @@ function autFormSchema_(type) {
   var cacheKey = 'AUT_FORM_SCHEMA_' + type;
   var cached = cache.get(cacheKey);
   if (cached) return autJsonParse_(cached, []);
-  var fields = autRows_('FORMULARIOS').filter(function(row) {
-    return String(row.TIPO_PROCESSO) === String(type) && autNormalize_(row.ATIVO) !== 'NAO';
+  var fields = autRowsBy_('FORMULARIOS', 'TIPO_PROCESSO', type).filter(function(row) {
+    return autNormalize_(row.ATIVO) !== 'NAO';
   }).map(function(row) {
     return {
       id: row.ID_CAMPO,
@@ -318,7 +318,16 @@ function autFormSchema_(type) {
       options: autJsonParse_(row.OPCOES_JSON, []),
       required: autNormalize_(row.OBRIGATORIO) === 'SIM',
       order: Number(row.ORDEM || 0),
-      condition: autJsonParse_(row.CONDICAO_JSON, null)
+      condition: autJsonParse_(row.CONDICAO_JSON, null),
+      indexCode: row.CODIGO_INDICE || SCHEMA.fieldCode(type, row.CAMPO),
+      source: {
+        system: row.FONTE_SISTEMA || 'AUTENTIKO_OK_NUVEM',
+        sheet: row.FONTE_ABA || 'PROCESSO_DADOS',
+        column: row.FONTE_COLUNA || row.CAMPO
+      },
+      aliases: autJsonParse_(row.ALIASES_JSON, []),
+      schemaVersion: row.SCHEMA_VERSION || SCHEMA.version,
+      supportsNotInformed: autNormalize_(row.OBRIGATORIO) !== 'SIM'
     };
   });
   fields.sort(function(a, b) { return a.order - b.order; });

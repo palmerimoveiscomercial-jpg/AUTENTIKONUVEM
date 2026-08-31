@@ -9,7 +9,12 @@ const schema = z.object({
   AUT_DRIVE_SYNC_WORKER_ENABLED: z.string().default('false'),
   ADOBE_ENABLED: z.string().default('false'),
   ADOBE_WEBHOOK_SECRET: z.string().optional(),
-  ADOBE_MONTHLY_LIMIT: z.coerce.number().int().positive().default(500)
+  ADOBE_MONTHLY_LIMIT: z.coerce.number().int().positive().default(500),
+  CLOUDINARY_ENABLED: z.string().default('false'),
+  CLOUDINARY_CLOUD_NAME: z.string().trim().min(1).optional(),
+  CLOUDINARY_API_KEY: z.string().trim().min(1).optional(),
+  CLOUDINARY_API_SECRET: z.string().min(20).optional(),
+  CLOUDINARY_FOLDER_MODE: z.string().default('DYNAMIC_FOLDERS')
 });
 
 export type Env = z.infer<typeof schema>;
@@ -43,4 +48,16 @@ export function allowedOrigins(): Set<string> {
 
 export function adobeEnabled(): boolean {
   return env().ADOBE_ENABLED.toLowerCase() === 'true';
+}
+
+export function cloudinaryEnabled(): boolean {
+  return env().CLOUDINARY_ENABLED.toLowerCase() === 'true';
+}
+
+export function cloudinaryConfigured(): boolean {
+  return Boolean(
+    process.env.CLOUDINARY_CLOUD_NAME &&
+    process.env.CLOUDINARY_API_KEY &&
+    process.env.CLOUDINARY_API_SECRET
+  );
 }

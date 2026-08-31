@@ -2,14 +2,17 @@
   "name": "@autentiko/media-maintenance",
   "private": true,
   "type": "module",
-  "version": "2.5.0",
+  "version": "2.8.0",
   "scripts": {
     "migrate": "node migrate-media.mjs",
     "reconcile": "node reconcile-media.mjs",
-    "jobs": "node process-media-jobs.mjs"
+    "jobs": "node process-media-jobs.mjs",
+    "outbox": "node process-data-outbox.mjs"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "@supabase/supabase-js": "2.110.8",
+    "cloudinary": "^2.11.0",
     "dotenv": "^17.2.0",
     "sharp": "0.35.3"
   },

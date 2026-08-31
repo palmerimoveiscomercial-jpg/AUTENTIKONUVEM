@@ -15,8 +15,11 @@ export const uploadRequestSchema = z.object({
 });
 
 export const completionObjectSchema = objectInputSchema.extend({
-  bucket: z.enum(['autentiko-originals', 'autentiko-thumbnails']),
-  objectPath: z.string().min(10).max(1024)
+  provider: z.enum(['supabase', 'cloudinary']).default('supabase'),
+  bucket: z.string().min(1).max(100),
+  objectPath: z.string().min(10).max(1024),
+  publicId: z.string().min(1).max(255).optional(),
+  assetFolder: z.string().max(1024).optional()
 });
 
 export const completionTokenSchema = z.object({
@@ -31,7 +34,19 @@ export const completionTokenSchema = z.object({
 });
 
 export const completionRequestSchema = z.object({
-  completionToken: z.string().min(20)
+  completionToken: z.string().min(20),
+  providerProofs: z.array(z.object({
+    provider: z.literal('cloudinary'),
+    role: z.enum(['original', 'thumbnail', 'preview']),
+    assetId: z.string().min(1).max(255),
+    publicId: z.string().min(1).max(255),
+    version: z.number().int().positive(),
+    signature: z.string().regex(/^[a-f0-9]{40,64}$/i),
+    bytes: z.number().int().positive(),
+    format: z.string().min(1).max(30),
+    resourceType: z.enum(['image', 'video', 'raw']),
+    type: z.string().min(1).max(30)
+  })).max(2).default([])
 });
 
 export const accessRequestSchema = z.object({

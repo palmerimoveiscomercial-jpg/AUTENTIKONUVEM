@@ -4,6 +4,7 @@ import {fail, json, options} from '@/lib/http';
 import {accessRequestSchema} from '@/lib/schemas';
 import {signedAccessUrl} from '@/lib/storage';
 import {verifyTicket} from '@/lib/ticket';
+import {cloudinaryAccessUrl} from '@/lib/cloudinary';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -23,7 +24,16 @@ export async function POST(request: NextRequest) {
         ? ['preview', 'original'] as const
         : ['original'] as const;
     const object = await findReadyObject(ticket.documentId, ticket.version, [...roles]);
-    const accessUrl = await signedAccessUrl(object.bucket, object.objectPath, 60);
+    const accessUrl = object.provider === 'cloudinary'
+      ? cloudinaryAccessUrl({
+          publicId: object.publicId || object.objectPath,
+          format: object.format || object.mimeType.split('/')[1] || 'jpg',
+          resourceType: object.resourceType || 'image',
+          deliveryType: object.deliveryType || 'authenticated',
+          download: ticket.action === 'DOWNLOAD',
+          expiresIn: 60
+        })
+      : await signedAccessUrl(object.bucket, object.objectPath, 60);
     return json(request, {
       ok: true,
       data: {
@@ -32,7 +42,8 @@ export async function POST(request: NextRequest) {
         mimeType: object.mimeType,
         size: object.size,
         sha256: object.sha256,
-        optimized: object.role === 'preview'
+        optimized: object.role === 'preview',
+        provider: object.provider
       }
     });
   } catch (error) {

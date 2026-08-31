@@ -11,6 +11,7 @@ function setupSystem() {
     autSeedDocuments_();
     autSeedWorkflowV2_();
     var developer = autSeedDeveloper_();
+    var authorizedAccounts = autEnsureAuthorizedAccounts_();
     var folder = autEnsureWritableRootFolder_();
     var indexBootstrap = null;
     if (typeof autSearchRebuildIndex_ === 'function') {
@@ -30,6 +31,7 @@ function setupSystem() {
       spreadsheetUrl: db.getUrl(),
       sheets: Object.keys(AUTENTIKO_SHEETS),
       developerEmail: developer.email,
+      authorizedAccounts: authorizedAccounts,
       bootstrapPassword: developer.created ? developer.password : '',
       documentsFolderUrl: folder.getUrl(),
       searchIndex: indexBootstrap,
@@ -122,17 +124,26 @@ function autSeedConfigurations_() {
     ['MENSAGEM_MANUTENCAO', 'O sistema está em manutenção programada. Tente novamente em alguns minutos.', 'SISTEMA', 'TEXT', 'Mensagem de manutenção', 'SIM'],
     ['PDF_PREVIEW_ENABLED', 'SIM', 'DOCUMENTOS', 'BOOLEAN', 'Ativa a pré-visualização autenticada e persistente de PDFs', 'SIM'],
     ['MAX_PDF_SIZE_MB', String(AUTENTIKO.MAX_UPLOAD_MB), 'DOCUMENTOS', 'NUMBER', 'Tamanho máximo de PDF aceito e pré-visualizado, em MB', 'SIM'],
-    ['MEDIA_CLOUD_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa gradualmente a nuvem documental privada do Supabase', 'SIM'],
-    ['MEDIA_PROVIDER', 'SUPABASE_EDGE', 'DOCUMENTOS', 'TEXT', 'Provedor da API documental; Supabase Edge evita hospedagem comercial paga', 'NAO'],
+    ['MEDIA_CLOUD_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa gradualmente a nuvem documental privada e autenticada', 'SIM'],
+    ['MEDIA_PROVIDER', 'CLOUDINARY', 'DOCUMENTOS', 'TEXT', 'Cloudinary é a camada operacional de mídia; Drive mantém os originais e backups', 'NAO'],
     ['MEDIA_API_BASE_URL', 'https://kgcucxqtzqcsskhjfmzl.supabase.co/functions/v1/media-api', 'DOCUMENTOS', 'TEXT', 'URL HTTPS da API de mídia validada pelo AUTENTIKO', 'SIM'],
     ['MEDIA_MAX_UPLOAD_MB', '25', 'DOCUMENTOS', 'NUMBER', 'Tamanho máximo de novos uploads diretos na nuvem, em MB', 'SIM'],
     ['MEDIA_MAX_PDF_SOURCE_MB', '100', 'DOCUMENTOS', 'NUMBER', 'Limite de entrada para PDF pesado; acima de 25 MB será otimizado em segundo plano', 'SIM'],
     ['MEDIA_LARGE_UPLOAD_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Libera arquivos acima de 6 MB somente após a redundância Drive estar operacional', 'SIM'],
     ['MEDIA_DRIVE_SYNC_WORKER_READY', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Confirmação operacional do worker Supabase para Google Drive; manter desativado até health check profundo', 'NAO'],
     ['AUTENTIKO_OK_DOC_ENABLED', 'SIM', 'CONTRATOS', 'BOOLEAN', 'Ativa o módulo contratual determinístico integrado ao AUTENTIKO OK NUVEM', 'SIM'],
+    ['PRIMARY_DATA_SOURCE', 'SHEETS', 'BANCO_DE_DADOS', 'TEXT', 'Fonte operacional durante a transição; alterar para NEON somente depois da migração validada', 'NAO'],
+    ['REMOTE_BACKEND_ENABLED', 'NAO', 'BANCO_DE_DADOS', 'BOOLEAN', 'Libera o gateway seguro Apps Script para a API do backend', 'SIM'],
+    ['NEON_READ_ENABLED', 'NAO', 'BANCO_DE_DADOS', 'BOOLEAN', 'Libera leituras do Neon depois do teste de equivalência', 'SIM'],
+    ['NEON_WRITE_ENABLED', 'NAO', 'BANCO_DE_DADOS', 'BOOLEAN', 'Libera gravações e a migração para o Neon depois do schema aplicado', 'SIM'],
+    ['SHEETS_BACKUP_ENABLED', 'SIM', 'BANCO_DE_DADOS', 'BOOLEAN', 'Mantém a planilha como espelho administrativo e backup', 'SIM'],
+    ['DRIVE_BACKUP_ENABLED', 'SIM', 'BANCO_DE_DADOS', 'BOOLEAN', 'Mantém os originais pesados e cópias de segurança no Drive', 'SIM'],
     ['DATA_CLOUD_ENABLED', 'NAO', 'BANCO_DE_DADOS', 'BOOLEAN', 'Ativa consultas e sincronização com o índice Neon por meio da API Vercel', 'SIM'],
     ['DATA_API_BASE_URL', '', 'BANCO_DE_DADOS', 'URL', 'URL HTTPS do backend Vercel, sem caminho final nem barra no fim', 'SIM'],
     ['DATA_SYNC_BATCH_SIZE', '250', 'BANCO_DE_DADOS', 'NUMBER', 'Quantidade máxima de registros enviados por lote ao Neon', 'SIM'],
+    ['CLOUDINARY_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa uploads assinados e miniaturas pelo backend', 'SIM'],
+    ['CLOUDINARY_CLOUD_NAME', 'llbdih6f', 'DOCUMENTOS', 'TEXT', 'Nome público da conta Cloudinary', 'NAO'],
+    ['CLOUDINARY_FOLDER_MODE', 'DYNAMIC_FOLDERS', 'DOCUMENTOS', 'TEXT', 'Organização dos assets em pastas dinâmicas sem mudar o identificador', 'NAO'],
     ['ADOBE_ENABLED', 'NAO', 'DOCUMENTOS', 'BOOLEAN', 'Ativa o processamento excepcional por Adobe PDF Services', 'SIM'],
     ['ADOBE_MONTHLY_LIMIT', '500', 'DOCUMENTOS', 'NUMBER', 'Limite mensal monitorado de transações do Adobe PDF Services', 'SIM'],
     ['AUDITORIA_RETENCAO_ANOS', '10', 'AUDITORIA', 'NUMBER', 'Retenção inicial dos registros finalizados e de auditoria', 'SIM'],
@@ -176,7 +187,7 @@ function autSeedConfigurations_() {
     }
   });
   var blankDefaultRepairs = {
-    MEDIA_PROVIDER: 'SUPABASE_EDGE',
+    MEDIA_PROVIDER: 'CLOUDINARY',
     MEDIA_API_BASE_URL: 'https://kgcucxqtzqcsskhjfmzl.supabase.co/functions/v1/media-api',
     ADOBE_MONTHLY_LIMIT: '500',
     DATA_SYNC_BATCH_SIZE: '250'
@@ -199,6 +210,11 @@ function autSeedLists_() {
     TIPO_IMOVEL: ['Casa', 'Lote', 'Terreno', 'Apartamento', 'Lançamento', 'Imóvel na planta', 'Prédio comercial', 'Cota'],
     MODALIDADE_CAPTACAO: ['Imóvel com exclusividade', 'Imóvel sem exclusividade', 'Autorização verbal simples', 'Autorização simples'],
     ORIGEM_RENDA: ['Salário', 'Trabalho autônomo', 'Empresa própria', 'Benefício do INSS', 'Aposentadoria ou pensão', 'Aluguéis', 'Investimentos', 'Outros'],
+    RELACAO_RECADO: ['Cônjuge', 'Pai', 'Mãe', 'Filho(a)', 'Irmão(ã)', 'Parente', 'Amigo(a)', 'Trabalho', 'Outro'],
+    NATUREZA_OCUPACAO: ['Empregado CLT', 'Servidor público', 'Autônomo', 'Empresário', 'Aposentado', 'Pensionista', 'Profissional liberal', 'Estudante', 'Desempregado', 'Outro'],
+    PARCELAMENTO_CAUCAO_POR: ['Imobiliária', 'Cartão de crédito'],
+    FORMA_PAGAMENTO_NEGOCIACAO: ['À vista', 'Crédito', 'Débito', 'Parcelado', 'PIX', 'Transferência bancária'],
+    TIPO_CHAVE_PIX: ['E-mail', 'CPF', 'Contato', 'Chave aleatória'],
     SIM_NAO: ['Sim', 'Não'],
     TIPO_ATUACAO: ['Observação', 'Contato com cliente', 'Análise documental', 'Solicitação de documento', 'Alteração cadastral', 'Decisão']
   };
@@ -225,41 +241,55 @@ function autField_(type, section, name, label, input, required, order, options, 
     OBRIGATORIO: required ? 'SIM' : 'NAO',
     ORDEM: order,
     ATIVO: 'SIM',
-    CONDICAO_JSON: condition ? JSON.stringify(condition) : ''
+    CONDICAO_JSON: condition ? JSON.stringify(condition) : '',
+    CODIGO_INDICE: SCHEMA.fieldCode(type, name),
+    FONTE_SISTEMA: 'AUTENTIKO_OK_NUVEM',
+    FONTE_ABA: 'PROCESSO_DADOS',
+    FONTE_COLUNA: name,
+    ALIASES_JSON: JSON.stringify(SCHEMA.getAliases(name)),
+    SCHEMA_VERSION: SCHEMA.version
   };
 }
 
 function autBuyerFields_(type, start, section) {
-  var rental = AUTENTIKO.RENTAL_INCOME_TYPES.indexOf(type) >= 0;
   var fields = [
-    ['responsavel_processo', 'Responsável pelo processo', 'text', true, 'Controle do processo', start],
-    ['cliente_nome', 'Nome do cliente / comprador / locatário', 'text', true, 'Cliente — Dados pessoais', start + 10],
+    ['responsavel_processo', 'Responsável pelo processo', 'user_select', true, 'Controle do processo', start],
+    ['cliente_nome', 'Nome do cliente / comprador / locatário', 'text', true, 'Cliente — Dados de identificação', start + 10],
     ['cliente_cpf', 'CPF', 'cpf', true, 'Cliente — Dados pessoais', start + 11],
     ['cliente_nascimento', 'Data de nascimento', 'date', false, 'Cliente — Dados pessoais', start + 12],
     ['cliente_documento', 'RG, CNH ou carteira de órgão credenciado', 'text', false, 'Cliente — Dados pessoais', start + 13],
     ['cliente_documento_expedicao', 'Data de expedição', 'date', false, 'Cliente — Dados pessoais', start + 14],
     ['cliente_orgao_expedidor', 'Órgão expedidor', 'text', false, 'Cliente — Dados pessoais', start + 15],
     ['cliente_estado_civil', 'Estado civil', 'select', false, 'Cliente — Dados pessoais', start + 16, 'ESTADO_CIVIL'],
-    ['cliente_contato', 'Telefone principal', 'tel', true, 'Cliente — Dados de contato', start + 30],
+    ['cliente_nome_mae', 'Nome da mãe', 'text', false, 'Cliente — Dados pessoais', start + 17],
+    ['cliente_nome_pai', 'Nome do pai', 'text', false, 'Cliente — Dados pessoais', start + 18],
+    ['cliente_conjuge_nome', 'Nome do cônjuge', 'text', false, 'Cliente — Dados pessoais', start + 19, null, { field: 'cliente_estado_civil', in: ['Casado(a)', 'União estável'] }],
+    ['cliente_conjuge_cpf', 'CPF do cônjuge', 'cpf', false, 'Cliente — Dados pessoais', start + 20, null, { field: 'cliente_estado_civil', in: ['Casado(a)', 'União estável'] }],
+    ['cliente_conjuge_rg', 'RG do cônjuge', 'text', false, 'Cliente — Dados pessoais', start + 21, null, { field: 'cliente_estado_civil', in: ['Casado(a)', 'União estável'] }],
+    ['cliente_contato', 'Telefone principal', 'tel', false, 'Cliente — Dados de contato e endereço', start + 30],
     ['cliente_contato_recado', 'Telefone de recado', 'tel', false, 'Cliente — Dados de contato', start + 31],
     ['cliente_contato_recado_nome', 'Nome do contato de recado', 'text', false, 'Cliente — Dados de contato', start + 32],
-    ['cliente_email', 'E-mail', 'email', true, 'Cliente — Dados de contato', start + 33],
-    ['cliente_rua', 'Rua', 'text', true, 'Cliente — Dados de endereço', start + 40],
-    ['cliente_numero', 'Número', 'text', true, 'Cliente — Dados de endereço', start + 41],
-    ['cliente_bairro', 'Bairro', 'text', true, 'Cliente — Dados de endereço', start + 42],
+    ['cliente_contato_recado_relacao', 'Relação do contato de recado', 'select', false, 'Cliente — Dados de contato', start + 33, 'RELACAO_RECADO'],
+    ['cliente_email', 'E-mail', 'email', false, 'Cliente — Dados de contato', start + 34],
+    ['cliente_rua', 'Logradouro', 'text', false, 'Cliente — Dados de endereço', start + 40],
+    ['cliente_numero', 'Número', 'text', false, 'Cliente — Dados de endereço', start + 41],
+    ['cliente_bairro', 'Bairro', 'text', false, 'Cliente — Dados de endereço', start + 42],
     ['cliente_complemento', 'Complemento', 'text', false, 'Cliente — Dados de endereço', start + 43],
-    ['cliente_cidade', 'Cidade', 'text', true, 'Cliente — Dados de endereço', start + 44],
-    ['cliente_cep', 'CEP', 'cep', true, 'Cliente — Dados de endereço', start + 45],
-    ['cliente_profissao', 'Profissão', 'text', rental, 'Cliente — Renda e emprego', start + 60],
-    ['cliente_renda', 'Renda mensal comprovada', 'currency', rental, 'Cliente — Renda e emprego', start + 61],
-    ['cliente_renda_origem', 'Origem principal da renda', 'select', rental, 'Cliente — Renda e emprego', start + 62, 'ORIGEM_RENDA'],
-    ['cliente_empresa', 'Empresa ou local onde trabalha', 'text', rental, 'Cliente — Renda e emprego', start + 63],
-    ['cliente_cargo', 'Cargo', 'text', rental, 'Cliente — Renda e emprego', start + 64],
-    ['cliente_funcao', 'Função exercida', 'text', rental, 'Cliente — Renda e emprego', start + 65],
-    ['cliente_tempo_emprego', 'Tempo de trabalho ou atividade', 'text', false, 'Cliente — Renda e emprego', start + 66]
+    ['cliente_cidade', 'Cidade', 'text', false, 'Cliente — Dados de endereço', start + 44],
+    ['cliente_cep', 'CEP', 'cep', false, 'Cliente — Dados de endereço', start + 45],
+    ['cliente_renda', 'Renda bruta', 'currency', false, 'Cliente — Renda e emprego', start + 60],
+    ['cliente_renda_origem', 'Origem da renda', 'select', false, 'Cliente — Renda e emprego', start + 61, 'ORIGEM_RENDA'],
+    ['cliente_profissao', 'Profissão', 'text', false, 'Cliente — Renda e emprego', start + 62],
+    ['cliente_emprego', 'Emprego', 'text', false, 'Cliente — Renda e emprego', start + 63],
+    ['cliente_empresa', 'Empresa', 'text', false, 'Cliente — Renda e emprego', start + 64],
+    ['cliente_natureza_ocupacao', 'Natureza da ocupação', 'select', false, 'Cliente — Renda e emprego', start + 65, 'NATUREZA_OCUPACAO'],
+    ['cliente_contato_trabalho', 'Contato de trabalho', 'tel', false, 'Cliente — Renda e emprego', start + 66],
+    ['cliente_tem_renda_extra', 'Tem renda extra?', 'select', false, 'Cliente — Renda e emprego', start + 67, 'SIM_NAO'],
+    ['cliente_renda_extra_valor', 'Valor da renda extra', 'currency', false, 'Cliente — Renda e emprego', start + 68, null, { field: 'cliente_tem_renda_extra', equals: 'Sim' }],
+    ['cliente_renda_extra_origem', 'Origem da renda extra', 'text', false, 'Cliente — Renda e emprego', start + 69, null, { field: 'cliente_tem_renda_extra', equals: 'Sim' }]
   ];
   return fields.map(function(field) {
-    return autField_(type, field[4], field[0], field[1], field[2], field[3], field[5], field[6] ? { list: field[6] } : []);
+    return autField_(type, field[4], field[0], field[1], field[2], field[3], field[5], field[6] ? { list: field[6] } : [], field[7] || null);
   });
 }
 
@@ -272,20 +302,35 @@ function autOwnerFields_(type, start) {
     ['titular_documento_expedicao', 'Data de expedição', 'date', false, 'Proprietário ou vendedor — Dados pessoais', start + 4],
     ['titular_orgao_expedidor', 'Órgão expedidor', 'text', false, 'Proprietário ou vendedor — Dados pessoais', start + 5],
     ['titular_estado_civil', 'Estado civil', 'select', false, 'Proprietário ou vendedor — Dados pessoais', start + 6, 'ESTADO_CIVIL'],
-    ['titular_profissao', 'Profissão', 'text', false, 'Proprietário ou vendedor — Dados pessoais', start + 7],
-    ['titular_contato', 'Telefone principal', 'tel', true, 'Proprietário ou vendedor — Dados de contato', start + 20],
+    ['titular_nome_mae', 'Nome da mãe', 'text', false, 'Proprietário ou vendedor — Dados pessoais', start + 7],
+    ['titular_nome_pai', 'Nome do pai', 'text', false, 'Proprietário ou vendedor — Dados pessoais', start + 8],
+    ['titular_conjuge_nome', 'Nome do cônjuge', 'text', false, 'Proprietário ou vendedor — Dados pessoais', start + 9, null, { field: 'titular_estado_civil', in: ['Casado(a)', 'União estável'] }],
+    ['titular_conjuge_cpf', 'CPF do cônjuge', 'cpf', false, 'Proprietário ou vendedor — Dados pessoais', start + 10, null, { field: 'titular_estado_civil', in: ['Casado(a)', 'União estável'] }],
+    ['titular_conjuge_rg', 'RG do cônjuge', 'text', false, 'Proprietário ou vendedor — Dados pessoais', start + 11, null, { field: 'titular_estado_civil', in: ['Casado(a)', 'União estável'] }],
+    ['titular_contato', 'Telefone principal', 'tel', false, 'Proprietário ou vendedor — Dados de contato', start + 20],
     ['titular_contato_recado', 'Telefone de recado', 'tel', false, 'Proprietário ou vendedor — Dados de contato', start + 21],
     ['titular_contato_recado_nome', 'Nome do contato de recado', 'text', false, 'Proprietário ou vendedor — Dados de contato', start + 22],
-    ['titular_email', 'E-mail', 'email', false, 'Proprietário ou vendedor — Dados de contato', start + 23],
+    ['titular_contato_recado_relacao', 'Relação do contato de recado', 'select', false, 'Proprietário ou vendedor — Dados de contato', start + 23, 'RELACAO_RECADO'],
+    ['titular_email', 'E-mail', 'email', false, 'Proprietário ou vendedor — Dados de contato', start + 24],
     ['titular_rua', 'Rua', 'text', false, 'Proprietário ou vendedor — Dados de endereço', start + 40],
     ['titular_numero', 'Número', 'text', false, 'Proprietário ou vendedor — Dados de endereço', start + 41],
     ['titular_bairro', 'Bairro', 'text', false, 'Proprietário ou vendedor — Dados de endereço', start + 42],
     ['titular_complemento', 'Complemento', 'text', false, 'Proprietário ou vendedor — Dados de endereço', start + 43],
     ['titular_cidade', 'Cidade', 'text', false, 'Proprietário ou vendedor — Dados de endereço', start + 44],
-    ['titular_cep', 'CEP', 'cep', false, 'Proprietário ou vendedor — Dados de endereço', start + 45]
+    ['titular_cep', 'CEP', 'cep', false, 'Proprietário ou vendedor — Dados de endereço', start + 45],
+    ['titular_renda', 'Renda bruta', 'currency', false, 'Proprietário ou vendedor — Renda e emprego', start + 60],
+    ['titular_renda_origem', 'Origem da renda', 'select', false, 'Proprietário ou vendedor — Renda e emprego', start + 61, 'ORIGEM_RENDA'],
+    ['titular_profissao', 'Profissão', 'text', false, 'Proprietário ou vendedor — Renda e emprego', start + 62],
+    ['titular_emprego', 'Emprego', 'text', false, 'Proprietário ou vendedor — Renda e emprego', start + 63],
+    ['titular_empresa', 'Empresa', 'text', false, 'Proprietário ou vendedor — Renda e emprego', start + 64],
+    ['titular_natureza_ocupacao', 'Natureza da ocupação', 'select', false, 'Proprietário ou vendedor — Renda e emprego', start + 65, 'NATUREZA_OCUPACAO'],
+    ['titular_contato_trabalho', 'Contato de trabalho', 'tel', false, 'Proprietário ou vendedor — Renda e emprego', start + 66],
+    ['titular_tem_renda_extra', 'Tem renda extra?', 'select', false, 'Proprietário ou vendedor — Renda e emprego', start + 67, 'SIM_NAO'],
+    ['titular_renda_extra_valor', 'Valor da renda extra', 'currency', false, 'Proprietário ou vendedor — Renda e emprego', start + 68, null, { field: 'titular_tem_renda_extra', equals: 'Sim' }],
+    ['titular_renda_extra_origem', 'Origem da renda extra', 'text', false, 'Proprietário ou vendedor — Renda e emprego', start + 69, null, { field: 'titular_tem_renda_extra', equals: 'Sim' }]
   ];
   return fields.map(function(field) {
-    return autField_(type, field[4], field[0], field[1], field[2], field[3], field[5], field[6] ? { list: field[6] } : []);
+    return autField_(type, field[4], field[0], field[1], field[2], field[3], field[5], field[6] ? { list: field[6] } : [], field[7] || null);
   });
 }
 
@@ -294,7 +339,7 @@ function autSeedForms_() {
   var capture = 'CAPTACAO_HOMOLOGACAO_IMOVEL';
   AUTENTIKO.PROCESS_TYPES.forEach(function(type) {
     if (type !== capture) forms = forms.concat(autBuyerFields_(type, 10));
-    else forms.push(autField_(type, 'Controle do processo', 'responsavel_processo', 'Responsável pelo processo', 'text', true, 10));
+    else forms.push(autField_(type, 'Controle do processo', 'responsavel_processo', 'Responsável pelo processo', 'user_select', true, 10));
     forms = forms.concat(autOwnerFields_(type, 100));
   });
 
@@ -375,12 +420,56 @@ function autSeedForms_() {
     forms.push(autField_(type, 'Dados do imóvel e negociação', 'observacoes_negociacao', 'Observações da negociação', 'textarea', false, 314));
   });
 
+  AUTENTIKO.RENTAL_INCOME_TYPES.forEach(function(type) {
+    forms = forms.concat([
+      autField_(type, 'Dados do imóvel', 'imovel_codigo', 'Código interno do imóvel', 'property_lookup', false, 300),
+      autField_(type, 'Dados do imóvel', 'imovel_endereco', 'Endereço completo', 'textarea', false, 301),
+      autField_(type, 'Dados do imóvel', 'valor_aluguel_mensal', 'Valor do aluguel', 'currency', false, 302),
+      autField_(type, 'Dados do imóvel', 'valor_caucao', 'Valor da caução', 'currency', false, 303),
+      autField_(type, 'Dados do imóvel', 'quantidade_caucao', 'Quantidade de cauções', 'number', false, 304),
+      autField_(type, 'Dados do imóvel', 'comissao_valor', 'Valor da comissão', 'currency', false, 305),
+      autField_(type, 'Dados do imóvel', 'unidade_consumidora_numero', 'Unidade consumidora', 'text', false, 306),
+      autField_(type, 'Dados do imóvel', 'registro_cartorio_numero', 'Número de registro', 'text', false, 307),
+      autField_(type, 'Dados do imóvel', 'matricula_agua_numero', 'Matrícula Águas do Pará', 'text', false, 308),
+      autField_(type, 'Tratativas finais', 'caucao_parcelada', 'Contrato teve parcelamento de caução?', 'select', false, 400, { list: 'SIM_NAO' }),
+      autField_(type, 'Tratativas finais', 'caucao_parcelada_por', 'Parcelamento realizado por', 'select', false, 401, { list: 'PARCELAMENTO_CAUCAO_POR' }, { field: 'caucao_parcelada', equals: 'Sim' }),
+      autField_(type, 'Tratativas finais', 'caucao_numero_parcelas', 'Quantidade de parcelas da caução', 'number', false, 402, [], { field: 'caucao_parcelada_por', equals: 'Imobiliária' }),
+      autField_(type, 'Tratativas finais', 'caucao_parcelas', 'Datas e valores das parcelas', 'installments', false, 403, [], { field: 'caucao_parcelada_por', equals: 'Imobiliária' }),
+      autField_(type, 'Tratativas finais', 'contrato_tem_vencimento', 'Contrato já tem dia de vencimento?', 'select', false, 404, { list: 'SIM_NAO' }),
+      autField_(type, 'Tratativas finais', 'contrato_dia_vencimento', 'Dia do vencimento', 'number', false, 405, [], { field: 'contrato_tem_vencimento', equals: 'Sim' }),
+      autField_(type, 'Tratativas finais', 'administracao_interna', 'Imóvel sob administração interna?', 'select', false, 406, { list: 'SIM_NAO' })
+    ]);
+  });
+
+  var transactionTypes = [financed, cash, 'COMPRA_IMOVEL_PARCELADO', 'COMPRA_VENDA_IMOVEL', 'PERMUTA_IMOVEL', 'CONTRATO_LEGALIZACAO'];
+  transactionTypes.forEach(function(type) {
+    forms = forms.concat([
+      autField_(type, 'Tratativas da negociação', 'imovel_valor', 'Valor do imóvel', 'currency', false, 500),
+      autField_(type, 'Tratativas da negociação', 'valor_negociado', 'Valor negociado', 'currency', false, 501),
+      autField_(type, 'Tratativas da negociação', 'comissao_valor', 'Comissão', 'currency', false, 502),
+      autField_(type, 'Tratativas da negociação', 'formas_pagamento', 'Formas de pagamento', 'multiselect', false, 503, { list: 'FORMA_PAGAMENTO_NEGOCIACAO' }),
+      autField_(type, 'Tratativas da negociação', 'distribuicao_pagamentos', 'Valor pago em cada forma selecionada', 'payment_allocation', false, 504),
+      autField_(type, 'Tratativas da negociação', 'conta_bancaria_proprietario', 'Conta bancária do proprietário', 'text', false, 505),
+      autField_(type, 'Tratativas da negociação', 'chave_pix', 'Chave PIX', 'text', false, 506),
+      autField_(type, 'Tratativas da negociação', 'tipo_chave_pix', 'Tipo de chave PIX', 'select', false, 507, { list: 'TIPO_CHAVE_PIX' }),
+      autField_(type, 'Tratativas da negociação', 'valor_entrada', 'Valor de entrada', 'currency', false, 508, [], { field: 'formas_pagamento', contains: 'Parcelado' }),
+      autField_(type, 'Tratativas da negociação', 'numero_parcelas', 'Número de parcelas', 'number', false, 509, [], { field: 'formas_pagamento', contains: 'Parcelado' }),
+      autField_(type, 'Tratativas da negociação', 'dia_vencimento_parcela', 'Dia de vencimento', 'number', false, 510, [], { field: 'formas_pagamento', contains: 'Parcelado' }),
+      autField_(type, 'Tratativas da negociação', 'valor_parcela', 'Valor de cada parcela', 'currency', false, 511, [], { field: 'formas_pagamento', contains: 'Parcelado' }),
+      autField_(type, 'Tratativas da negociação', 'adicional_credito', 'Adicional pago pelo cliente na simulação de crédito', 'currency', false, 512, [], { field: 'formas_pagamento', contains: 'Crédito' })
+    ]);
+  });
+
+  var uniqueForms = {};
+  forms.forEach(function(field) { uniqueForms[field.ID_CAMPO] = field; });
+  forms = Object.keys(uniqueForms).map(function(id) { return uniqueForms[id]; });
+
   var existing = {};
   autRows_('FORMULARIOS').forEach(function(row) { existing[row.ID_CAMPO] = row; });
   autAppendMany_('FORMULARIOS', forms.filter(function(field) { return !existing[field.ID_CAMPO]; }));
   var properties = PropertiesService.getScriptProperties();
   var schemaVersion = Number(properties.getProperty('AUT_FORM_SCHEMA_VERSION') || 0);
-  if (schemaVersion < 4) {
+  if (schemaVersion < 7) {
     var desired = {};
     forms.forEach(function(field) { desired[field.ID_CAMPO] = field; });
     var sheet = autSheet_('FORMULARIOS');
@@ -397,7 +486,7 @@ function autSeedForms_() {
       });
       sheet.getRange(2, 1, values.length, headers.length).setValues(values);
     }
-    properties.setProperty('AUT_FORM_SCHEMA_VERSION', '4');
+    properties.setProperty('AUT_FORM_SCHEMA_VERSION', '7');
   }
 }
 
@@ -505,7 +594,7 @@ function autSeedDocuments_() {
 
 function autSeedDeveloper_() {
   var email = autNormalizeEmail_(Session.getEffectiveUser().getEmail() || 'barros.drt.autentiko@gmail.com');
-  var existing = autRows_('USUARIOS').filter(function(row) { return row.PERFIL === 'DESENVOLVEDOR' || autNormalizeEmail_(row.EMAIL) === email; })[0];
+  var existing = autRowsBy_('USUARIOS', 'EMAIL', email)[0];
   if (existing) return { created: false, email: existing.EMAIL, password: '' };
   var password = autTemporaryPassword_(16);
   var salt = autRandom_(24);
@@ -517,6 +606,30 @@ function autSeedDeveloper_() {
     ULTIMO_ACESSO: '', TENTATIVAS_FALHAS: 0, BLOQUEADO_ATE: '', DEVE_TROCAR_SENHA: 'SIM'
   });
   return { created: true, email: email, password: password };
+}
+
+function autEnsureAuthorizedAccounts_() {
+  var accounts = [
+    { email: 'antonio.barros3445@gmail.com', name: 'Antonio Barros da Costa Neto', role: 'DESENVOLVEDOR' },
+    { email: 'palmer.imoveis.comercial@gmail.com', name: 'Palmer Imóveis', role: 'ADMINISTRADOR' }
+  ];
+  accounts.forEach(function(account) {
+    var existing = autRowsBy_('USUARIOS', 'EMAIL', account.email)[0];
+    if (existing) {
+      if (autNormalize_(existing.STATUS) !== 'ATIVO') autUpdateRow_('USUARIOS', existing._row, { STATUS: 'ATIVO', ATUALIZADO_EM: autNow_() });
+      return;
+    }
+    var inaccessiblePassword = autTemporaryPassword_(32);
+    var salt = autRandom_(24);
+    autAppend_('USUARIOS', {
+      ID_USUARIO: autUuid_(), NOME: account.name, EMAIL: account.email,
+      USUARIO: account.email.split('@')[0], SENHA_HASH: autPasswordHash_(inaccessiblePassword, salt), SALT: salt,
+      PERFIL: account.role, STATUS: 'ATIVO', PERMISSOES_JSON: JSON.stringify(account.role === 'DESENVOLVEDOR' ? ['*'] : AUTENTIKO_DEFAULT_PERMISSIONS.ADMINISTRADOR),
+      EMAIL_VERIFICADO: 'SIM', CRIADO_EM: autNow_(), ATUALIZADO_EM: autNow_(),
+      ULTIMO_ACESSO: '', TENTATIVAS_FALHAS: 0, BLOQUEADO_ATE: '', DEVE_TROCAR_SENHA: 'NAO'
+    });
+  });
+  return accounts.map(function(account) { return account.email; });
 }
 
 function autPreviousFolderIdsKey_(propertyKey) {

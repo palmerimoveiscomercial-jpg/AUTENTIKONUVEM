@@ -1408,7 +1408,7 @@
       const sectionFields = groups[section.key].sort((a,b) => Number(a.order || 0) - Number(b.order || 0));
       return `<section class="form-section semantic-form-section section-${esc(section.key)}">
         <header><span class="form-section-icon">${esc(section.icon)}</span><div><p>${esc(section.party)}</p><h3>${esc(section.title)}</h3><small>${esc(section.description)}</small></div></header>
-        <div class="field-grid">${sectionFields.map(field => renderField(field, values[field.name])).join('')}</div>
+        <div class="field-grid">${sectionFields.map(field => renderField(field, values[field.name], values._fieldState?.[field.name])).join('')}</div>
       </section>`;
     }).join('');
     $$('[data-mask]', $('#dynamic-process-form')).forEach(input => {
@@ -1431,7 +1431,8 @@
       {key:'owner_personal', icon:'2A', party:'2. Proprietário ou vendedor', title:'Dados pessoais', description:'Identificação civil do titular do imóvel.'},
       {key:'owner_contact', icon:'2B', party:'2. Proprietário ou vendedor', title:'Dados de contato', description:'Telefones e e-mail do proprietário.'},
       {key:'owner_address', icon:'2C', party:'2. Proprietário ou vendedor', title:'Dados de endereço', description:'Endereço residencial do proprietário.'},
-      {key:'owner_property', icon:'2D', party:'2. Proprietário ou vendedor', title:'Dados do imóvel', description:'Imóvel, negociação, valores e regularidade.'},
+      {key:'owner_income', icon:'2D', party:'2. Proprietário ou vendedor', title:'Renda e emprego', description:'Renda, ocupação e vínculo profissional do proprietário.'},
+      {key:'owner_property', icon:'3', party:'Imóvel', title:'Dados do imóvel', description:'Imóvel, negociação, valores e regularidade.'},
       {key:'process_other', icon:'03', party:'Processo', title:'Informações complementares', description:'Financiamento, negociação e observações.'}
     ];
   }
@@ -1448,20 +1449,51 @@
     if (name.startsWith('titular_') || name.startsWith('proprietario_') || name.startsWith('vendedor_')) {
       if (/(contato|telefone|email)/.test(name)) return 'owner_contact';
       if (/(rua|numero|bairro|complemento|cidade|cep|endereco)/.test(name)) return 'owner_address';
+      if (/(renda|profissao|empresa|cargo|funcao|emprego|trabalho|atividade|ocupacao)/.test(name)) return 'owner_income';
       return 'owner_personal';
     }
     if (/^(imovel_|tipo_imovel|tem_|iptu_|matricula_|registro_|unidade_consumidora|conta_contrato|valor_aluguel)/.test(name)) return 'owner_property';
     return 'process_other';
   }
 
-  function renderField(field, value = '') {
-    const wide = ['textarea'].includes(field.input) ? 'full' : '';
+  function fieldOption(option) {
+    return option && typeof option === 'object'
+      ? {value:String(option.value ?? option.label ?? ''), label:String(option.label ?? option.value ?? '')}
+      : {value:String(option ?? ''), label:String(option ?? '')};
+  }
+
+  function parsedArrayValue(value) {
+    if (Array.isArray(value)) return value;
+    if (!value) return [];
+    try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+  }
+
+  function renderField(field, value = '', savedState = '') {
+    value = value ?? '';
+    const wide = ['textarea','multiselect','installments','payment_allocation'].includes(field.input) ? 'full' : '';
     const required = field.required ? 'required' : '';
     const marker = field.required ? ' *' : '';
     const condition = field.condition ? `data-condition='${esc(JSON.stringify(field.condition))}'` : '';
+    const isNotInformed = savedState === 'NAO_INFORMADO';
+    const stateToggle = field.required ? '' : `<label class="not-informed-toggle"><input type="checkbox" data-not-informed="${esc(field.name)}" ${isNotInformed?'checked':''}><span>Não informado</span></label>`;
+    const disabled = isNotInformed ? 'disabled' : '';
+    const uppercase = ['email','date','number','currency','cpf','cep','tel'].includes(field.input) ? '' : 'data-uppercase="true"';
     let control;
-    if (field.input === 'textarea') control = `<textarea name="${esc(field.name)}" maxlength="5000" ${required}>${esc(value)}</textarea>`;
-    else if (field.input === 'select') control = `<select name="${esc(field.name)}" ${required}><option value="">Selecione...</option>${(field.options || []).map(option => `<option value="${esc(option)}" ${String(option)===String(value)?'selected':''}>${esc(option)}</option>`).join('')}</select>`;
+    if (field.input === 'textarea') control = `<textarea name="${esc(field.name)}" maxlength="5000" ${uppercase} ${required} ${disabled}>${esc(value)}</textarea>`;
+    else if (field.input === 'select' || field.input === 'user_select') control = `<select name="${esc(field.name)}" ${required} ${disabled}><option value="">Selecione...</option>${(field.options || []).map(fieldOption).map(option => `<option value="${esc(option.value)}" ${String(option.value)===String(value)?'selected':''}>${esc(option.label)}</option>`).join('')}</select>`;
+    else if (field.input === 'multiselect') {
+      const selected = new Set(parsedArrayValue(value).map(String));
+      control = `<div class="multi-select" data-multi-select="${esc(field.name)}">${(field.options || []).map(fieldOption).map(option => `<label><input type="checkbox" name="${esc(field.name)}" value="${esc(option.value)}" data-multi-value="true" ${selected.has(option.value)?'checked':''} ${disabled}><span>${esc(option.label)}</span></label>`).join('')}</div>`;
+    }
+    else if (field.input === 'installments') {
+      const rows = parsedArrayValue(value);
+      control = `<div class="structured-list" data-structured="installments" data-field="${esc(field.name)}">${(rows.length?rows:[{}]).map((row,index)=>`<div class="structured-row"><span>${index+1}ª</span><input type="date" data-structured-key="date" value="${esc(row.date || '')}" ${disabled}><input type="text" inputmode="numeric" data-mask="currency" data-structured-key="value" value="${esc(row.value || '')}" placeholder="Valor" ${disabled}><button type="button" class="icon-btn" data-remove-structured aria-label="Remover parcela">×</button></div>`).join('')}<button type="button" class="secondary-btn compact" data-add-structured="installments" ${disabled}>Adicionar parcela</button></div>`;
+    }
+    else if (field.input === 'payment_allocation') {
+      let allocations = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      if (typeof value === 'string') { try { allocations = JSON.parse(value) || {}; } catch { allocations = {}; } }
+      control = `<div class="payment-allocation" data-payment-allocation="${esc(field.name)}" data-values='${esc(JSON.stringify(allocations))}'><small>Selecione as formas de pagamento acima para informar os valores.</small></div>`;
+    }
     else {
       const type = ({date:'date',email:'email',number:'number'}[field.input] || 'text');
       const inputMode = ['currency','cpf','cep','tel'].includes(field.input) ? 'inputmode="numeric"' : '';
@@ -1469,34 +1501,97 @@
       const validity = field.input === 'cpf'
         ? `<span class="field-validation-light" aria-hidden="true"></span>`
         : '';
-      control = `<span class="${field.input === 'cpf' ? 'validated-control' : 'plain-control'}"><input name="${esc(field.name)}" type="${type}" value="${esc(value)}" maxlength="500" ${inputMode} ${mask} ${required}>${validity}</span>${field.input === 'cpf' ? '<small class="field-validation-message">Digite um CPF válido para prosseguir.</small>' : ''}`;
+      control = `<span class="${field.input === 'cpf' ? 'validated-control' : 'plain-control'}"><input name="${esc(field.name)}" type="${type}" value="${esc(value)}" maxlength="500" ${inputMode} ${mask} ${uppercase} ${required} ${disabled}>${validity}</span>${field.input === 'cpf' ? '<small class="field-validation-message">Digite um CPF válido para prosseguir.</small>' : ''}`;
     }
-    return `<label class="${wide} field-label field-${esc(field.input)}" ${condition}>${esc(field.label)}${marker}${control}</label>`;
+    return `<div class="${wide} field-label field-${esc(field.input)} ${isNotInformed?'is-not-informed':''}" data-field-wrapper="${esc(field.name)}" ${condition}><span class="field-caption">${esc(field.label)}${marker}</span>${control}${stateToggle}</div>`;
   }
 
   function updateConditionalFields() {
     $$('[data-condition]', $('#dynamic-process-form')).forEach(label => {
       let condition;
       try { condition = JSON.parse(label.dataset.condition); } catch { return; }
-      const source = $(`[name="${CSS.escape(condition.field)}"]`, $('#dynamic-process-form'));
-      const visible = !source || source.value === String(condition.equals ?? '');
+      const sources = $$(`[name="${CSS.escape(condition.field)}"]`, $('#dynamic-process-form'));
+      const values = sources.filter(source => source.type !== 'checkbox' || source.checked).map(source => String(source.value || ''));
+      const norm = item => String(item ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toUpperCase();
+      let visible = !sources.length;
+      if ('equals' in condition) visible = values.some(value => norm(value) === norm(condition.equals));
+      else if (Array.isArray(condition.in)) visible = values.some(value => condition.in.some(item => norm(value) === norm(item)));
+      else if (condition.contains) visible = values.some(value => norm(value) === norm(condition.contains));
       label.classList.toggle('hidden', !visible);
-      const input = $('input,select,textarea', label);
-      if (input) input.disabled = !visible;
+      $$('input,select,textarea,button', label).forEach(input => {
+        const notInformed = $('[data-not-informed]', label)?.checked;
+        if (!input.matches('[data-not-informed]')) input.disabled = !visible || Boolean(notInformed);
+      });
     });
+    syncPaymentAllocation();
   }
 
   function formObject(form) {
     const out = {};
-    if (form instanceof HTMLFormElement) {
-      new FormData(form).forEach((value, key) => { out[key] = value; });
-    } else {
-      $$('[name]:not(:disabled)', form).forEach(field => {
-        if ((field.type === 'checkbox' || field.type === 'radio') && !field.checked) return;
-        out[field.name] = field.value;
-      });
-    }
+    $$('[name]:not(:disabled)', form).forEach(field => {
+      if ((field.type === 'checkbox' || field.type === 'radio') && !field.checked) return;
+      if (field.dataset.multiValue) (out[field.name] ||= []).push(field.value);
+      else out[field.name] = field.value;
+    });
+    const states = {};
+    $$('[data-field-wrapper]', form).forEach(wrapper => {
+      const name = wrapper.dataset.fieldWrapper;
+      const notInformed = $('[data-not-informed]', wrapper)?.checked;
+      const notApplicable = wrapper.classList.contains('hidden');
+      states[name] = notApplicable ? 'NAO_APLICAVEL' : notInformed ? 'NAO_INFORMADO' : ((out[name] == null || out[name] === '') ? 'PENDENTE_VALIDACAO' : 'INFORMADO');
+      if (notInformed || notApplicable) out[name] = null;
+    });
+    $$('[data-structured="installments"]', form).forEach(list => {
+      if ($('[data-not-informed]:checked', list.closest('[data-field-wrapper]'))) return;
+      out[list.dataset.field] = $$('.structured-row', list).map(row => ({
+        date:$('[data-structured-key="date"]', row)?.value || '',
+        value:$('[data-structured-key="value"]', row)?.value || ''
+      })).filter(row => row.date || row.value);
+    });
+    $$('[data-payment-allocation]', form).forEach(list => {
+      const allocations = {};
+      $$('[data-allocation-method]', list).forEach(input => { if (input.value) allocations[input.dataset.allocationMethod] = input.value; });
+      out[list.dataset.paymentAllocation] = allocations;
+    });
+    if (Object.keys(states).length) out._fieldState = states;
     return out;
+  }
+
+  function syncPaymentAllocation() {
+    const target = $('[data-payment-allocation]', $('#dynamic-process-form'));
+    if (!target) return;
+    let saved = {};
+    try { saved = JSON.parse(target.dataset.values || '{}') || {}; } catch { saved = {}; }
+    $$('[data-allocation-method]', target).forEach(input => { saved[input.dataset.allocationMethod] = input.value; });
+    const selected = $$('[name="formas_pagamento"]:checked', $('#dynamic-process-form')).map(input => input.value);
+    target.innerHTML = selected.length ? selected.map(method => `<label><span>${esc(method)}</span><input type="text" inputmode="numeric" data-mask="currency" data-allocation-method="${esc(method)}" value="${esc(saved[method] || '')}" placeholder="R$ 0,00"></label>`).join('') : '<small>Selecione as formas de pagamento acima para informar os valores.</small>';
+    target.dataset.values = JSON.stringify(saved);
+  }
+
+  function toggleNotInformed(control) {
+    const wrapper = control.closest('[data-field-wrapper]');
+    if (!wrapper) return;
+    wrapper.classList.toggle('is-not-informed', control.checked);
+    $$('input,select,textarea,button', wrapper).forEach(element => {
+      if (!element.matches('[data-not-informed]')) element.disabled = control.checked || wrapper.classList.contains('hidden');
+    });
+    scheduleShortProcessDraftSave();
+  }
+
+  function addStructuredInstallment(list) {
+    const button = $('[data-add-structured]', list);
+    const row = document.createElement('div');
+    row.className = 'structured-row';
+    row.innerHTML = `<span>${$$('.structured-row', list).length + 1}ª</span><input type="date" data-structured-key="date"><input type="text" inputmode="numeric" data-mask="currency" data-structured-key="value" placeholder="Valor"><button type="button" class="icon-btn" data-remove-structured aria-label="Remover parcela">×</button>`;
+    list.insertBefore(row, button);
+  }
+
+  function uppercaseFormValue(input) {
+    if (!input.matches('[data-uppercase]')) return;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    input.value = input.value.toLocaleUpperCase('pt-BR');
+    try { input.setSelectionRange(start, end); } catch {}
   }
 
   function maskValue(input) {
@@ -1861,9 +1956,10 @@
 
   function incomeEvaluationFromForm() {
     const type = $('#new-process-type').value;
-    const applicable = ['ALUGUEL_ANUAL','ALUGUEL_SEMESTRAL','ALUGUEL_TRIMESTRAL','ALUGUEL_MENSAL'].includes(type);
+    const rental = ['ALUGUEL_ANUAL','ALUGUEL_SEMESTRAL','ALUGUEL_TRIMESTRAL','ALUGUEL_MENSAL'].includes(type);
     const income = parseCurrencyText($('[name="cliente_renda"]', $('#dynamic-process-form'))?.value);
     const rent = parseCurrencyText($('[name="valor_aluguel_mensal"]', $('#dynamic-process-form'))?.value || $('[name="valor_aluguel"]', $('#dynamic-process-form'))?.value || $('[name="valor_negociado"]', $('#dynamic-process-form'))?.value);
+    const applicable = rental && income > 0 && rent > 0;
     return {applicable, income, rent, requiredIncome:rent * 3, adequate:!applicable || (income > 0 && rent > 0 && income >= rent * 3)};
   }
 
@@ -4603,6 +4699,51 @@
     });
   }
 
+  async function uploadCloudinaryObject(file, target, job) {
+    return await new Promise((resolve, reject) => {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('api_key', target.apiKey);
+      form.append('timestamp', String(target.timestamp));
+      form.append('signature', target.signature);
+      form.append('public_id', target.publicId);
+      form.append('asset_folder', target.assetFolder);
+      form.append('type', target.deliveryType || 'authenticated');
+      form.append('context', target.context || 'tenant=PALMER');
+      form.append('overwrite', 'false');
+      const request = new XMLHttpRequest();
+      request.open('POST', target.uploadUrl, true);
+      request.timeout = 120000;
+      request.upload.onprogress = event => {
+        if (!event.lengthComputable) return;
+        job.progress = Math.min(Math.round((event.loaded / event.total) * 100), 100);
+        renderUploadQueue();
+      };
+      request.onerror = () => reject(new Error('O upload da imagem para o Cloudinary falhou.'));
+      request.ontimeout = () => reject(new Error('O Cloudinary demorou para responder. Tente novamente.'));
+      request.onload = () => {
+        let response = {};
+        try { response = JSON.parse(request.responseText || '{}'); } catch {}
+        if (request.status < 200 || request.status >= 300 || !response.asset_id || !response.public_id) {
+          return reject(new Error(response?.error?.message || 'O Cloudinary não confirmou o upload.'));
+        }
+        resolve({
+          provider:'cloudinary',
+          role:target.role,
+          assetId:response.asset_id,
+          publicId:response.public_id,
+          version:Number(response.version),
+          signature:response.signature,
+          bytes:Number(response.bytes),
+          format:String(response.format || ''),
+          resourceType:String(response.resource_type || 'image'),
+          type:String(response.type || '')
+        });
+      };
+      request.send(form);
+    });
+  }
+
   async function runCloudUploadJob(job, options = {}) {
     if (!job.cloudSession) {
       job.progress = 1;
@@ -4655,12 +4796,15 @@
       job.cloudSession = {reservation, session, sha256, thumbnail, requestId:cloudRequestId};
     }
     const {reservation, session, sha256, thumbnail, requestId:cloudRequestId} = job.cloudSession;
+    const providerProofs = [];
     for (const target of session.objects) {
       const source = target.role === 'thumbnail' ? thumbnail : job.file;
-      if (source) await uploadTusObject(source, target, job);
+      if (!source) continue;
+      if (target.provider === 'cloudinary') providerProofs.push(await uploadCloudinaryObject(source, target, job));
+      else await uploadTusObject(source, target, job);
     }
     const completed = await mediaApiRequest(reservation.apiBaseUrl, '/api/v1/media/uploads/complete', {
-      body:{completionToken:session.completionToken},
+      body:{completionToken:session.completionToken, providerProofs},
       timeoutMs:120000
     });
     let finalization;
@@ -5493,8 +5637,9 @@
       if(draft)updateShortProcessDraftStatus(`Rascunho recuperado, salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}.`,true);
       else{updateShortProcessDraftStatus('',false);scheduleShortProcessDraftSave();}
     });
-    $('#dynamic-process-form').addEventListener('change',()=>{updateConditionalFields();updateIncomeAffordability();scheduleShortProcessDraftSave();});
-    $('#dynamic-process-form').addEventListener('input',event=>{if(event.target.dataset.mask)maskValue(event.target);if(event.target.matches('[data-mask="cpf"]'))scheduleCustomerDatabaseLookup(event.target);if(event.target.name==='imovel_codigo')schedulePropertyDatabaseLookup(event.target);scheduleShortProcessDraftSave();});
+    $('#dynamic-process-form').addEventListener('change',event=>{if(event.target.matches('[data-not-informed]'))toggleNotInformed(event.target);updateConditionalFields();updateIncomeAffordability();scheduleShortProcessDraftSave();});
+    $('#dynamic-process-form').addEventListener('input',event=>{uppercaseFormValue(event.target);if(event.target.dataset.mask)maskValue(event.target);if(event.target.matches('[data-mask="cpf"]'))scheduleCustomerDatabaseLookup(event.target);if(event.target.name==='imovel_codigo')schedulePropertyDatabaseLookup(event.target);scheduleShortProcessDraftSave();});
+    $('#dynamic-process-form').addEventListener('click',event=>{const add=event.target.closest('[data-add-structured]');if(add){addStructuredInstallment(add.closest('[data-structured="installments"]'));scheduleShortProcessDraftSave();return;}const remove=event.target.closest('[data-remove-structured]');if(remove){remove.closest('.structured-row')?.remove();scheduleShortProcessDraftSave();}});
     $('#income-acceptance-check').addEventListener('change',scheduleShortProcessDraftSave);
     $('#process-form').addEventListener('submit',submitProcess);
     $('#dashboard-filter-btn').addEventListener('click',()=>loadProcesses('dashboard'));$('#process-filter-btn').addEventListener('click',()=>loadProcesses('processes'));

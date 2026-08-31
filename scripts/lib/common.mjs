@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {promisify} from 'node:util';
 import {createClient} from '@supabase/supabase-js';
+import {v2 as cloudinary} from 'cloudinary';
 import sharp from 'sharp';
 
 const execFileAsync = promisify(execFile);
@@ -225,6 +226,34 @@ export async function downloadStorage(bucket, key) {
   const {data, error} = await supabase.storage.from(bucket).download(key);
   if (error || !data) throw error || new Error('STORAGE_DOWNLOAD_FAILED');
   return Buffer.from(await data.arrayBuffer());
+}
+
+export async function downloadCloudinaryAsset(input) {
+  cloudinary.config({
+    cloud_name:required('CLOUDINARY_CLOUD_NAME'),
+    api_key:required('CLOUDINARY_API_KEY'),
+    api_secret:required('CLOUDINARY_API_SECRET'),
+    secure:true
+  });
+  const publicId = safeSegment(input.publicId);
+  const resourceType = ['image','video','raw'].includes(input.resourceType) ? input.resourceType : 'image';
+  if (input.deliveryType !== 'authenticated') throw new Error('CLOUDINARY_ACCESS_INVALID');
+  const deliveryType = 'authenticated';
+  const url = cloudinary.utils.private_download_url(publicId, String(input.format || 'jpg'), {
+    resource_type:resourceType,
+    type:deliveryType,
+    expires_at:Math.floor(Date.now() / 1000) + 300,
+    attachment:false
+  });
+  const response = await fetch(url, {cache:'no-store'});
+  if (!response.ok) throw new Error(`CLOUDINARY_DOWNLOAD_FAILED:${response.status}`);
+  const advertised = Number(response.headers.get('content-length') || 0);
+  const expectedSize = Math.max(Number(input.expectedSize || 0), 0);
+  if (advertised && expectedSize && advertised !== expectedSize) throw new Error('CLOUDINARY_SIZE_MISMATCH');
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (expectedSize && buffer.length !== expectedSize) throw new Error('CLOUDINARY_SIZE_MISMATCH');
+  if (buffer.length > 25 * 1024 * 1024) throw new Error('CLOUDINARY_FILE_TOO_LARGE');
+  return buffer;
 }
 
 async function boundedThumbnail(input) {

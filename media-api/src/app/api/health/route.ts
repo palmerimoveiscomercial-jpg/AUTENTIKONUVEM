@@ -1,8 +1,9 @@
 import {NextResponse} from 'next/server';
 import {supabaseAdmin} from '../../../lib/supabase';
-import {supabaseConfigured} from '../../../lib/env';
+import {cloudinaryConfigured, cloudinaryEnabled, supabaseConfigured} from '../../../lib/env';
 import {dataCloudConfigured} from '../../../lib/data-env';
 import {pingNeon} from '../../../lib/neon';
+import {pingCloudinary} from '../../../lib/cloudinary';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,7 +12,8 @@ export async function GET(request: Request) {
   const deep = new URL(request.url).searchParams.get('deep') === '1';
   const hasSupabase = supabaseConfigured();
   const neonConfigured = dataCloudConfigured();
-  const [database, neon] = deep ? await Promise.all([
+  const hasCloudinary = cloudinaryEnabled() && cloudinaryConfigured();
+  const [database, neon, cloudinary] = deep ? await Promise.all([
     (async () => {
       if (!hasSupabase) return false;
       try {
@@ -21,14 +23,15 @@ export async function GET(request: Request) {
         return false;
       }
     })(),
-    neonConfigured ? pingNeon() : Promise.resolve(false)
-  ]) : [hasSupabase, neonConfigured];
+    neonConfigured ? pingNeon() : Promise.resolve(false),
+    hasCloudinary ? pingCloudinary() : Promise.resolve(false)
+  ]) : [hasSupabase, neonConfigured, hasCloudinary];
   const workerConfigured = (process.env.AUT_DRIVE_SYNC_WORKER_ENABLED || 'false').toLowerCase() === 'true';
   return NextResponse.json({
     ok: true,
     data: {
       service: 'autentiko-media-api',
-      version: '2.7.0',
+      version: '2.8.0',
       region: process.env.VERCEL_REGION || 'local',
       time: new Date().toISOString(),
       database,
@@ -40,6 +43,13 @@ export async function GET(request: Request) {
         provider: 'NEON',
         configured: neonConfigured,
         healthy: neon
+      },
+      imageCloud: {
+        provider: 'CLOUDINARY',
+        cloudName: hasCloudinary ? process.env.CLOUDINARY_CLOUD_NAME : null,
+        folderMode: process.env.CLOUDINARY_FOLDER_MODE || 'DYNAMIC_FOLDERS',
+        configured: hasCloudinary,
+        healthy: cloudinary
       },
       integrations: {
         brasilApi: {configured: true},

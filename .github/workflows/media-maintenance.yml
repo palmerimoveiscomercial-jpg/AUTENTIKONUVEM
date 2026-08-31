@@ -26,6 +26,9 @@ jobs:
       ADOBE_CLIENT_ID: ${{ secrets.ADOBE_CLIENT_ID }}
       ADOBE_CLIENT_SECRET: ${{ secrets.ADOBE_CLIENT_SECRET }}
       ADOBE_MONTHLY_LIMIT: ${{ vars.ADOBE_MONTHLY_LIMIT || '500' }}
+      CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+      CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+      CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
       RECONCILE_LIMIT: "100"
     steps:
       - uses: actions/checkout@v4

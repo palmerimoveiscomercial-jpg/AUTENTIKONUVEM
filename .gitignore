@@ -15,3 +15,6 @@ dist
 service-account*.json
 adobe-credentials*.json
 apps-script/.clasp.json
+.env*
+!.env.example
+!**/.env.example

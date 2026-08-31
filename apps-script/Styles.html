@@ -127,6 +127,12 @@
   .visual-doc-media.preview-opening:after{content:"Abrindo…";position:absolute;inset:auto 10px 10px auto;padding:5px 8px;border-radius:999px;background:rgba(15,23,42,.88);color:#fff;font-size:9px;font-weight:800;z-index:2}
   .audit-load-more{display:flex;align-items:center;justify-content:center;gap:12px;padding:14px;border-top:1px solid var(--line)}
   .audit-load-more small{color:var(--muted)}
+  .field-caption{display:block;margin-bottom:6px;color:#344054;font-size:11px;font-weight:700}.field-label[data-field-wrapper]{position:relative;display:block}.field-label [data-uppercase]{text-transform:uppercase}
+  .not-informed-toggle{display:inline-flex;align-items:center;gap:6px;margin-top:7px;color:#667085;font-size:10px;font-weight:650;cursor:pointer}.not-informed-toggle input{width:14px;height:14px;margin:0;accent-color:#155eef}
+  .field-label.is-not-informed{padding:9px;border:1px dashed #d0d5dd;border-radius:9px;background:#f9fafb}.field-label.is-not-informed>.field-caption{color:#98a2b3}.field-label.is-not-informed input:not([data-not-informed]),.field-label.is-not-informed select,.field-label.is-not-informed textarea{opacity:.55}
+  .multi-select{display:flex;flex-wrap:wrap;gap:7px;padding:9px;border:1px solid #d0d5dd;border-radius:9px;background:#fff}.multi-select label{display:inline-flex;align-items:center;gap:6px;padding:7px 9px;border:1px solid #e4e7ec;border-radius:999px;background:#f8fafc;color:#344054;font-size:11px;cursor:pointer}.multi-select input{width:14px;height:14px;margin:0;accent-color:#155eef}
+  .structured-list{display:grid;gap:8px}.structured-row{display:grid;grid-template-columns:38px minmax(140px,.7fr) minmax(150px,1fr) 34px;align-items:center;gap:8px}.structured-row>span{color:#667085;font-size:11px;font-weight:800}.structured-row .icon-btn{width:34px;height:34px}.secondary-btn.compact{justify-self:start;min-height:34px;padding:6px 10px}
+  .payment-allocation{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.payment-allocation label{display:grid;gap:5px;padding:9px;border:1px solid #e4e7ec;border-radius:9px;background:#f9fafb}.payment-allocation label span,.payment-allocation small{color:#667085;font-size:10px;font-weight:700}
 
   @media(max-width:820px){
     .health-grid{grid-template-columns:1fr;padding:14px}.secret-config-form{grid-template-columns:1fr;margin:0 14px 14px}.secret-config-form .btn{width:100%}.contract-clause-toolbar{align-items:flex-start;flex-direction:column}.contract-clause-row{grid-template-columns:1fr}.contract-clause-row .icon-btn{margin-top:0;justify-self:end}
@@ -136,7 +142,7 @@
     .preview-view-actions{width:100%;justify-content:flex-end;overflow:auto}.detail-head-actions{gap:5px}.detail-head-actions .btn{padding:7px 9px}
     .selected-file-row{grid-template-columns:48px minmax(0,1fr)}.selected-file-row .document-local-thumb{width:48px;height:48px}.selected-file-row .document-selected-actions{grid-column:1/-1}
     .document-group-requirement{align-items:flex-start}.upload-queue-widget{right:10px;bottom:78px;width:calc(100vw - 20px)}
-    .workflow-state-card{align-items:flex-start;flex-direction:column}.workflow-action-buttons{justify-content:flex-start;width:100%}.participant-grid,.proposal-list,.manager-checklist{grid-template-columns:1fr}
+    .workflow-state-card{align-items:flex-start;flex-direction:column}.workflow-action-buttons{justify-content:flex-start;width:100%}.participant-grid,.proposal-list,.manager-checklist{grid-template-columns:1fr}.structured-row{grid-template-columns:32px 1fr 1fr 34px}
     #detail-modal{height:100vh}.process-detail-tabs{display:flex!important;padding:8px 12px!important;overflow-x:auto}.process-detail-tab{flex:0 0 auto;min-width:max-content}.process-ok-panel{margin:12px;padding:14px}.process-ok-heading{align-items:flex-start;flex-direction:column}.process-ok-main{width:100%;min-width:0}.review-section-heading{align-items:flex-start;flex-direction:column}.database-toolbar{align-items:stretch;flex-direction:column}.database-toolbar .btn{width:100%}.database-tabs{overflow:auto}.database-tabs button{flex:0 0 auto;min-width:180px}.database-pagination{flex-wrap:wrap}.property-record-grid{grid-template-columns:1fr}.property-record-grid article.wide{grid-column:auto}.database-match-body{grid-template-columns:1fr}.database-match-icon{width:42px;height:42px}
   }
 </style>

@@ -1,5 +1,6 @@
 import {
   checkpoint,
+  downloadCloudinaryAsset,
   downloadStorage,
   driveDownload,
   driveFindOrCreateFolder,
@@ -34,14 +35,22 @@ log('media_jobs_started', {records:jobs.length});
 async function originalFor(job) {
   const {data, error} = await supabase
     .from('media_objects')
-    .select('bucket,object_key,mime_type,size_bytes,sha256')
+    .select('provider,bucket,object_key,mime_type,size_bytes,sha256,public_id,format,resource_type,delivery_type')
     .eq('document_id', job.document_id)
     .eq('version', job.version)
     .eq('role', 'original')
     .eq('state', 'READY')
     .single();
   if (error) throw error;
-  const buffer = await downloadStorage(data.bucket, data.object_key);
+  const buffer = data.provider === 'cloudinary'
+    ? await downloadCloudinaryAsset({
+        publicId:data.public_id || data.object_key,
+        format:data.format || data.mime_type.split('/')[1],
+        resourceType:data.resource_type,
+        deliveryType:data.delivery_type,
+        expectedSize:Number(data.size_bytes)
+      })
+    : await downloadStorage(data.bucket, data.object_key);
   if (sha256(buffer) !== data.sha256) throw new Error('STORAGE_HASH_MISMATCH');
   return {...data, buffer};
 }

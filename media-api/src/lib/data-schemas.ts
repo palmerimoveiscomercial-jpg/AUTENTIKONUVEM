@@ -21,6 +21,23 @@ export const syncRequestSchema = z.object({
   records: z.array(searchRecordSchema).min(1).max(500)
 });
 
+export const migrationRecordSchema = z.object({
+  sourceRow: z.number().int().min(2),
+  raw: z.record(z.string(), z.unknown()),
+  canonical: z.record(z.string(), z.unknown())
+});
+
+export const sheetsMigrationRequestSchema = z.object({
+  schemaVersion: z.string().trim().min(1).max(40),
+  migrationId: safeIdentifier,
+  batchId: safeIdentifier,
+  tenantId: safeIdentifier.default('PALMER'),
+  sourceSystem: z.string().trim().min(2).max(80).regex(/^[A-Z0-9_]+$/),
+  sourceSpreadsheetId: safeIdentifier,
+  sourceTable: z.string().trim().min(2).max(80).regex(/^[A-Z0-9_]+$/),
+  records: z.array(migrationRecordSchema).min(1).max(400)
+});
+
 export const contractIssueSchema = z.object({
   idempotencyKey: safeIdentifier,
   processId: safeIdentifier.optional(),
@@ -35,4 +52,5 @@ export const contractIssueSchema = z.object({
 });
 
 export type SyncRequest = z.infer<typeof syncRequestSchema>;
+export type SheetsMigrationRequest = z.infer<typeof sheetsMigrationRequestSchema>;
 export type ContractIssueRequest = z.infer<typeof contractIssueSchema>;

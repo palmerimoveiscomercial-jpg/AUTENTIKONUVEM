@@ -431,7 +431,7 @@ const context = vm.createContext({
   MimeType: { PDF: 'application/pdf' }
 });
 
-const order = ['Config.gs', 'Utils.gs', 'DataService.gs', 'SearchService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'MediaService.gs', 'AdminService.gs', 'ApiService.gs', 'Setup.gs', 'Code.gs'];
+const order = ['AutentikoSchema.gs', 'Config.gs', 'Utils.gs', 'DataService.gs', 'SearchService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'MediaService.gs', 'AdminService.gs', 'ApiService.gs', 'DataCloudService.gs', 'AutentikoDataGateway.gs', 'Setup.gs', 'Code.gs'];
 for (const name of order) {
   const source = fs.readFileSync(path.join(projectDir, name), 'utf8');
   new vm.Script(source, { filename: name }).runInContext(context);
@@ -504,28 +504,30 @@ check('raiz documental privada rotaciona referências sem perder o histórico', 
   assert.ok(context.autFolderHistoryIds_('AUT_DOCUMENTS_FOLDER_ID').includes(foreignRoot.id));
 });
 
-check('683 campos organizados e 14 tipos de formulário', () => {
-  assert.equal(context.autRows_('FORMULARIOS').length, 683);
+let installedFormCount = 0;
+check('formulário completo organizado por todos os tipos de processo', () => {
+  installedFormCount = context.autRows_('FORMULARIOS').length;
+  assert.ok(installedFormCount >= 1000);
   const types = new Set(context.autRows_('FORMULARIOS').map((row) => row.TIPO_PROCESSO));
-  assert.equal(types.size, 14);
+  assert.equal(types.size, context.AUTENTIKO.PROCESS_TYPES.length);
 });
 
 check('cache de formulários segmentado abaixo de 100 KB', () => {
   const all = context.autFormSchemas_();
-  assert.equal(Object.keys(all).length, 14);
+  assert.equal(Object.keys(all).length, context.AUTENTIKO.PROCESS_TYPES.length);
   assert.ok(Buffer.byteLength(JSON.stringify(all), 'utf8') > 100_000, 'O cenário original precisa exceder 100 KB');
   assert.equal(cache.entries.has('AUT_FORM_SCHEMAS'), false);
   const formEntries = [...cache.entries].filter(([key]) => key.startsWith('AUT_FORM_SCHEMA_'));
-  assert.equal(formEntries.length, 14);
-  assert.ok(Math.max(...formEntries.map(([, value]) => Buffer.byteLength(value, 'utf8'))) < 15_000);
+  assert.equal(formEntries.length, context.AUTENTIKO.PROCESS_TYPES.length);
+  assert.ok(Math.max(...formEntries.map(([, value]) => Buffer.byteLength(value, 'utf8'))) < 90_000);
 });
 
 check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
-  assert.equal(diagnostic.formFields, 683);
-  assert.equal(diagnostic.codeVersion, '2.7.0');
-  assert.ok(diagnostic.maxFormCacheBytes < 15_000);
+  assert.equal(diagnostic.formFields, installedFormCount);
+  assert.equal(diagnostic.codeVersion, '2.8.0');
+  assert.ok(diagnostic.maxFormCacheBytes < 90_000);
 });
 
 check('proteção de texto literal e reparo de configurações', () => {
@@ -544,7 +546,7 @@ check('proteção de texto literal e reparo de configurações', () => {
   assert.equal(context.autFind_('CONFIGURACOES', 'CHAVE', 'VERSAO_SISTEMA').VALOR, context.AUTENTIKO.APP_VERSION);
   assert.equal(context.autFind_('CONFIGURACOES', 'CHAVE', 'EMPRESA_CRECI').VALOR, '12.594');
   assert.equal(context.autFind_('CONFIGURACOES', 'CHAVE', 'CERTIFICADO_CPF_TITULAR').VALOR, '06120034269');
-  assert.equal(context.autRows_('FORMULARIOS').length, 683, 'A reinstalação não pode duplicar campos');
+  assert.equal(context.autRows_('FORMULARIOS').length, installedFormCount, 'A reinstalação não pode duplicar campos');
 });
 
 let token;
@@ -574,15 +576,15 @@ check('API JSON cria chave sem armazenar segredo em claro', () => {
 check('bootstrap leve sem schema monolítico', () => {
   const bootstrap = data(context.apiBootstrap(token));
   assert.equal(Object.keys(bootstrap.formSchemas).length, 0);
-  assert.equal(bootstrap.processTypes.length, 14);
-  assert.ok(Buffer.byteLength(JSON.stringify(bootstrap), 'utf8') < 30_000);
+  assert.equal(bootstrap.processTypes.length, context.AUTENTIKO.PROCESS_TYPES.length);
+  assert.ok(Buffer.byteLength(JSON.stringify(bootstrap), 'utf8') < 60_000);
 });
 
 let financedFields;
 check('carregamento sob demanda do formulário financiado', () => {
   const form = data(context.apiObterFormularioProcesso(token, 'COMPRA_IMOVEL_FINANCIADO'));
   financedFields = form.fields;
-  assert.equal(financedFields.length, 54);
+  assert.ok(financedFields.length >= 70);
   const select = financedFields.find((field) => field.name === 'modalidade_financiamento');
   assert.ok(Array.isArray(select.options));
   assert.ok(select.options.length >= 1);
@@ -594,6 +596,10 @@ function sampleValue(field) {
   if (field.name.includes('cpf')) return '52998224725';
   if (field.input === 'email') return 'cliente@example.com';
   if (field.input === 'select') return field.options[0];
+  if (field.input === 'user_select') return field.options[0]?.value || field.options[0]?.label || 'Usuário Teste';
+  if (field.input === 'multiselect') return field.options.slice(0, 2);
+  if (field.input === 'installments') return [{date:'2026-02-10', value:'R$ 100,00'}];
+  if (field.input === 'payment_allocation') return {'À vista':'R$ 100,00'};
   if (field.input === 'date') return '2026-01-15';
   if (field.input === 'number' || field.input === 'currency') return '100';
   if (field.input === 'tel') return '(91) 99999-9999';
@@ -784,9 +790,9 @@ check('captação e homologação cria imóvel com documentação obrigatória p
   captureData.imovel_matricula = 'CAP-MAT-001';
   captureData.imovel_endereco = 'Avenida da Captação, 10, Belém - PA';
   const created = data(context.apiCriarProcesso(token, { type: 'CAPTACAO_HOMOLOGACAO_IMOVEL', data: captureData }, { requestId: 'capture-process-one' }));
-  assert.equal(created.process.clientName, captureData.titular_nome);
+  assert.equal(created.process.clientName, captureData.titular_nome.toUpperCase());
   const captureRow = context.autFind_('PROCESSOS', 'ID_PROCESSO', created.process.id);
-  assert.equal(captureRow.CLIENTE_NOME, captureData.titular_nome);
+  assert.equal(captureRow.CLIENTE_NOME, captureData.titular_nome.toUpperCase());
   assert.equal(captureRow.CLIENTE_CPF, String(captureData.titular_cpf).replace(/\D/g, ''));
   const detail = data(context.apiDetalharProcesso(token, created.process.id));
   const required = detail.requiredDocuments.filter((document) => document.required).map((document) => document.id);
@@ -864,7 +870,7 @@ check('edição da ficha é versionada e preserva a versão anterior', () => {
   assert.ok(inactiveRows.length >= financedFields.length);
   assert.ok(inactiveRows.every((row) => row.SUBSTITUIDO_EM));
   const registration = data(context.apiCarregarAbaProcesso(token, processId, 'CADASTRO'));
-  assert.equal(registration.data.cliente_nome, 'Cliente Atualizado com Segurança');
+  assert.equal(registration.data.cliente_nome, 'CLIENTE ATUALIZADO COM SEGURANÇA');
   assert.equal(registration.processVersion, versionBefore + 1);
 });
 
@@ -1342,11 +1348,11 @@ check('administração sem autenticações redundantes visíveis', () => {
   const configHeaders = context.autHeaders_(spreadsheet.getSheetByName('CONFIGURACOES'));
   spreadsheet.getSheetByName('CONFIGURACOES').getRange(dateConfig._row, configHeaders.indexOf('VALOR') + 1).setValue(new Date('2025-08-18T12:00:00Z'));
   const admin = data(context.apiAdminBootstrap(token));
-  assert.equal(admin.users.users.length, 1);
+  assert.equal(admin.users.users.length, 2);
   assert.equal(admin.documents.documents.length, 42);
-  assert.equal(admin.documents.documents.find((doc) => doc.id === 'DOC_IDENTIDADE_CLIENTE').requiredProcessTypes.length, 13);
+  assert.equal(admin.documents.documents.find((doc) => doc.id === 'DOC_IDENTIDADE_CLIENTE').requiredProcessTypes.length, context.AUTENTIKO.PROCESS_TYPES.length - 1);
   assert.equal(admin.documents.documents.find((doc) => doc.id === 'DOC_CONTRACHEQUE_OLERITE').processTypes.length, 4);
-  assert.equal(admin.forms.length, 683);
+  assert.equal(admin.forms.length, installedFormCount);
   assert.ok(admin.configs.configs.length >= 20);
   assert.equal(admin.configs.configs.find((config) => config.key === 'CERTIFICADO_EMISSAO').value, '2025-08-18');
   const sensitive = admin.configs.configs.filter((config) => config.type === 'SENSITIVE');

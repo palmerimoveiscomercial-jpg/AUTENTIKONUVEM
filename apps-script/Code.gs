@@ -153,9 +153,13 @@ function apiObterFormularioProcesso(token, type) {
     autAssert_(AUTENTIKO.PROCESS_TYPES.indexOf(type) >= 0, 'Tipo de processo inválido.');
     var fields = autFormSchema_(type);
     var lists = autLists_();
+    var activeUsers = autRowsBy_('USUARIOS', 'STATUS', 'ATIVO').map(function(user) {
+      return { value: user.NOME, label: user.NOME };
+    }).sort(function(a, b) { return a.label.localeCompare(b.label); });
     fields.forEach(function(field) {
       if (field.options && field.options.list) field.options = lists[field.options.list] || [];
+      if (field.input === 'user_select') field.options = activeUsers;
     });
-    return autResult_({ type: type, fields: fields });
+    return autResult_({ type: type, fields: fields, schemaVersion: SCHEMA.version });
   } catch (err) { return autPublicError_(err); }
 }

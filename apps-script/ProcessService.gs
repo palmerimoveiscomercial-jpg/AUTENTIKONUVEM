@@ -113,6 +113,8 @@ function autProcessDataMap_(process) {
       value = autJsonParse_(String(value || ''), value);
     }
     data[row.CAMPO] = value;
+    data._fieldState = data._fieldState || {};
+    data._fieldState[row.CAMPO] = row.ESTADO_CAMPO || (value == null || value === '' ? 'PENDENTE_VALIDACAO' : 'INFORMADO');
   });
   return data;
 }
@@ -129,6 +131,8 @@ function autProcessSummaryJson_(data) {
   keys.forEach(function(key) {
     if (data[key] !== undefined && data[key] !== null && String(data[key]) !== '') summary[key] = data[key];
   });
+  if (data._fieldState && typeof data._fieldState === 'object') summary._fieldState = data._fieldState;
+  summary._schemaVersion = data._schemaVersion || SCHEMA.version;
   return autJson_(summary);
 }
 
@@ -199,16 +203,30 @@ function autSchemaFor_(type) {
 
 function autFieldVisible_(field, data) {
   if (!field.condition || !field.condition.field) return true;
-  return String(data[field.condition.field] || '') === String(field.condition.equals || '');
+  var value = data[field.condition.field];
+  if (Object.prototype.hasOwnProperty.call(field.condition, 'equals')) {
+    return autNormalize_(value) === autNormalize_(field.condition.equals);
+  }
+  if (Array.isArray(field.condition.in)) {
+    return field.condition.in.map(autNormalize_).indexOf(autNormalize_(value)) >= 0;
+  }
+  if (field.condition.contains) {
+    var values = Array.isArray(value) ? value : [value];
+    return values.map(autNormalize_).indexOf(autNormalize_(field.condition.contains)) >= 0;
+  }
+  return true;
 }
 
 function autIncomeEvaluation_(type, data) {
-  var applicable = AUTENTIKO.RENTAL_INCOME_TYPES.indexOf(String(type || '')) >= 0;
+  var rental = AUTENTIKO.RENTAL_INCOME_TYPES.indexOf(String(type || '')) >= 0;
   var income = autCurrencyNumber_(data && data.cliente_renda);
   var rent = autCurrencyNumber_(data && (data.valor_aluguel_mensal || data.valor_aluguel || data.valor_negociado));
   var requiredIncome = rent * 3;
+  var applicable = rental && income > 0 && rent > 0;
   return {
     applicable: applicable,
+    rental: rental,
+    configured: income > 0 && rent > 0,
     income: income,
     rent: rent,
     requiredIncome: requiredIncome,
@@ -256,13 +274,11 @@ function autValidateProcessData_(type, data) {
     if (field.input === 'email' && data[field.name]) autAssert_(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(data[field.name])), 'E-mail inválido no campo: ' + field.label, 'INVALID_EMAIL');
     if (field.input === 'select' && data[field.name]) {
       var allowed = field.options && field.options.list ? (lists[field.options.list] || []) : (Array.isArray(field.options) ? field.options : []);
-      if (allowed.length) autAssert_(allowed.indexOf(data[field.name]) >= 0, 'Opção inválida no campo: ' + field.label, 'INVALID_OPTION');
+      if (allowed.length) autAssert_(allowed.map(autNormalize_).indexOf(autNormalize_(data[field.name])) >= 0, 'Opção inválida no campo: ' + field.label, 'INVALID_OPTION');
     }
   });
   var income = autIncomeEvaluation_(type, data);
   if (income.applicable) {
-    autAssert_(income.rent > 0, 'Informe o valor mensal do aluguel.', 'REQUIRED_FIELD');
-    autAssert_(income.income > 0, 'Informe a renda mensal comprovada do cliente.', 'REQUIRED_FIELD');
     autAssert_(income.adequate || income.accepted, 'A renda é inferior a três vezes o aluguel. Registre o aceite eletrônico para prosseguir.', 'INCOME_ACCEPTANCE_REQUIRED');
   }
   return schema;
@@ -280,7 +296,7 @@ function apiCriarProcesso(token, payload, context) {
     payload = payload || {};
     var type = String(payload.type || '');
     autAssert_(AUTENTIKO.PROCESS_TYPES.indexOf(type) >= 0, 'Tipo de processo inválido.');
-    var data = autCleanObject_(payload.data || {});
+    var data = SCHEMA.normalizeFormData(type, autCleanObject_(payload.data || {}));
     var schema = autValidateProcessData_(type, data);
     lock.waitLock(30000);
     var requestKey = autClaimRequest_(user, 'PROCESSO_CRIAR', context);
@@ -342,7 +358,9 @@ function apiCriarProcesso(token, payload, context) {
         ID_DADO: autUuid_(), ID_PROCESSO: id, SECAO: field.section, CAMPO: field.name,
         ROTULO: field.label, VALOR: Array.isArray(value) ? JSON.stringify(value) : value,
         TIPO_DADO: field.input, VERSAO_PROCESSO: 1, ATIVO: 'SIM',
-        LOTE_ATUALIZACAO: 'CRIACAO-' + id, SUBSTITUIDO_EM: '', ATUALIZADO_EM: now
+        LOTE_ATUALIZACAO: 'CRIACAO-' + id, SUBSTITUIDO_EM: '', ATUALIZADO_EM: now,
+        CODIGO_INDICE: field.indexCode || SCHEMA.fieldCode(type, field.name),
+        ESTADO_CAMPO: data._fieldState && data._fieldState[field.name] || (value == null || value === '' ? 'PENDENTE_VALIDACAO' : 'INFORMADO')
       };
     });
     autAppendMany_('PROCESSO_DADOS', virtualRows);
@@ -385,7 +403,7 @@ function apiAtualizarProcesso(token, processId, data, context) {
     var requestKey = autClaimRequest_(user, 'PROCESSO_ATUALIZAR|' + processId, context);
     autAssertExpectedVersion_(process, context && context.expectedVersion);
     autAssert_(autCanEditProcessRegistration_(user, process), 'Você não pode editar este processo.', 'FORBIDDEN');
-    data = autCleanObject_(data || {});
+    data = SCHEMA.normalizeFormData(process.TIPO_PROCESSO, autCleanObject_(data || {}));
     var schema = autValidateProcessData_(process.TIPO_PROCESSO, data);
     var now = autNow_();
     var nextVersion = autProcessVersion_(process) + 1;
@@ -402,7 +420,9 @@ function apiAtualizarProcesso(token, processId, data, context) {
         ROTULO: field.label,
         VALOR: Array.isArray(value) || (value && typeof value === 'object') ? autJson_(value) : value,
         TIPO_DADO: field.input, VERSAO_PROCESSO: nextVersion, ATIVO: 'PENDENTE',
-        LOTE_ATUALIZACAO: batchId, SUBSTITUIDO_EM: '', ATUALIZADO_EM: now
+        LOTE_ATUALIZACAO: batchId, SUBSTITUIDO_EM: '', ATUALIZADO_EM: now,
+        CODIGO_INDICE: field.indexCode || SCHEMA.fieldCode(process.TIPO_PROCESSO, field.name),
+        ESTADO_CAMPO: data._fieldState && data._fieldState[field.name] || (value == null || value === '' ? 'PENDENTE_VALIDACAO' : 'INFORMADO')
       };
     });
     autAppendMany_('PROCESSO_DADOS', nextDataRows);
