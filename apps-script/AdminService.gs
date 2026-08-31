@@ -444,7 +444,7 @@ function apiAdminBootstrap(token, section) {
     var actor = autRequireAuth_(token);
     var data = {};
     var requested = autNormalize_(section || '');
-    if ((requested === 'SETTINGS' || requested === 'SECURITY' || !requested) &&
+    if ((requested === 'SETTINGS' || requested === 'SECURITY' || requested === 'API' || !requested) &&
         autHasPermission_(actor, 'CONFIGURACAO_GERIR')) autSeedConfigurations_();
     var loadAll = !requested;
     data.availableTabs = [];
@@ -466,7 +466,8 @@ function apiAdminBootstrap(token, section) {
     if ((loadAll || requested === 'SECURITY') && autHasPermission_(actor, 'CONFIGURACAO_GERIR')) data.security = autAdminHealthData_(actor, false);
     if ((loadAll || requested === 'API') && autHasPermission_(actor, 'API_CHAVE_GERIR')) data.api = {
       scopes: AUTENTIKO_API_SCOPES,
-      items: autRows_('API_CHAVES').map(function(row) { return { id: row.ID_API, name: row.NOME, prefix: row.PREFIXO, scopes: autJsonParse_(row.ESCOPO_JSON, []), status: row.STATUS, createdAt: row.CRIADO_EM, createdBy: row.CRIADO_POR, lastUsedAt: row.ULTIMO_USO_EM, expiresAt: row.EXPIRA_EM, description: row.DESCRICAO }; })
+      items: autRows_('API_CHAVES').map(function(row) { return { id: row.ID_API, name: row.NOME, prefix: row.PREFIXO, scopes: autJsonParse_(row.ESCOPO_JSON, []), status: row.STATUS, createdAt: row.CRIADO_EM, createdBy: row.CRIADO_POR, lastUsedAt: row.ULTIMO_USO_EM, expiresAt: row.EXPIRA_EM, description: row.DESCRICAO }; }),
+      integrations: autIntegrationsAdminData_()
     };
     if ((loadAll || requested === 'MODELS') && autHasPermission_(actor, 'CONTRATO_MODELO_GERIR')) {
       data.contractModels = autRows_('MODELOS_CONTRATO').map(function(row) {

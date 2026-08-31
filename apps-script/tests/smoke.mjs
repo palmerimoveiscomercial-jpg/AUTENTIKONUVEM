@@ -431,7 +431,7 @@ const context = vm.createContext({
   MimeType: { PDF: 'application/pdf' }
 });
 
-const order = ['AutentikoSchema.gs', 'Config.gs', 'Utils.gs', 'DataService.gs', 'SearchService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'MediaService.gs', 'AdminService.gs', 'ApiService.gs', 'DataCloudService.gs', 'AutentikoDataGateway.gs', 'Setup.gs', 'Code.gs'];
+const order = ['AutentikoSchema.gs', 'Config.gs', 'Utils.gs', 'DataService.gs', 'SearchService.gs', 'AuditService.gs', 'AuthService.gs', 'ProcessService.gs', 'CommercialService.gs', 'WorkflowService.gs', 'MediaService.gs', 'IntegrationService.gs', 'AdminService.gs', 'ApiService.gs', 'DataCloudService.gs', 'AutentikoDataGateway.gs', 'Setup.gs', 'Code.gs'];
 for (const name of order) {
   const source = fs.readFileSync(path.join(projectDir, name), 'utf8');
   new vm.Script(source, { filename: name }).runInContext(context);
@@ -526,7 +526,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, installedFormCount);
-  assert.equal(diagnostic.codeVersion, '2.8.0');
+  assert.equal(diagnostic.codeVersion, '2.8.1');
   assert.ok(diagnostic.maxFormCacheBytes < 90_000);
 });
 
@@ -571,6 +571,22 @@ check('API JSON cria chave sem armazenar segredo em claro', () => {
   assert.ok(row);
   assert.notEqual(row.CHAVE_HASH, integrationApiKey);
   assert.equal(context.apiV1Request_({ parameter: {} }, { action: 'health' }).ok, true);
+});
+
+check('cofre de integrações não devolve segredos e bloqueia ativação sem teste aprovado', () => {
+  const saved = data(context.apiAdminSalvarIntegracao(token, 'BACKEND', {
+    baseUrl: 'https://autentiko.example',
+    apiKey: 'a'.repeat(40),
+    syncSecret: 'b'.repeat(40),
+    mediaSigningSecret: 'c'.repeat(64)
+  }, { requestId: 'smoke-integration-save' }));
+  assert.equal(saved.item.configured, true);
+  assert.ok(saved.item.fields.filter((field) => field.secret).every((field) => field.value === ''));
+  const tested = data(context.apiAdminTestarIntegracao(token, 'BACKEND', {}, { requestId: 'smoke-integration-test' }));
+  assert.equal(tested.success, false);
+  const activation = context.apiAdminAlternarIntegracao(token, 'BACKEND', true, { requestId: 'smoke-integration-enable' });
+  assert.equal(activation.ok, false);
+  assert.equal(activation.code, 'INTEGRATION_TEST_REQUIRED');
 });
 
 check('bootstrap leve sem schema monolítico', () => {
@@ -1354,6 +1370,8 @@ check('administração sem autenticações redundantes visíveis', () => {
   assert.equal(admin.documents.documents.find((doc) => doc.id === 'DOC_CONTRACHEQUE_OLERITE').processTypes.length, 4);
   assert.equal(admin.forms.length, installedFormCount);
   assert.ok(admin.configs.configs.length >= 20);
+  assert.equal(admin.api.integrations.items.length, 11);
+  assert.ok(admin.api.integrations.items.every((integration) => integration.fields.every((field) => !field.secret || field.value === '')));
   assert.equal(admin.configs.configs.find((config) => config.key === 'CERTIFICADO_EMISSAO').value, '2025-08-18');
   const sensitive = admin.configs.configs.filter((config) => config.type === 'SENSITIVE');
   assert.ok(sensitive.length >= 1);

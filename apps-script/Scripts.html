@@ -166,7 +166,10 @@
     apiMapearBaseDados: 45000,
     apiReconstruirIndiceBusca: 180000,
     apiPesquisarDriveIndice: 45000,
-    apiReconstruirIndiceDrive: 180000
+    apiReconstruirIndiceDrive: 180000,
+    apiAdminSalvarIntegracao: 45000,
+    apiAdminTestarIntegracao: 90000,
+    apiAdminAlternarIntegracao: 45000
   };
   const BROWSER_CACHE = Object.freeze({
     schemaVersion: '2.5.5',
@@ -5282,10 +5285,47 @@
     if(tab==='api')return renderAdminApi();
   }
 
+  function renderIntegrationField(integration, field) {
+    const required = field.required && (!field.secret || !field.configured) ? 'required' : '';
+    const configured = field.configured ? '<span class="integration-field-ok">Configurado</span>' : '';
+    const common = `name="${esc(field.key)}" maxlength="${Number(field.maxLength || 5000)}" ${required}`;
+    let control = '';
+    if (field.type === 'select') {
+      control = `<select ${common}>${(field.options || []).map(option => `<option value="${esc(option.value)}" ${String(field.value)===String(option.value)?'selected':''}>${esc(option.label)}</option>`).join('')}</select>`;
+    } else if (field.type === 'textarea') {
+      control = `<textarea ${common} ${field.secret?'autocomplete="new-password"':''} placeholder="${field.secret&&field.configured?'Valor protegido — deixe vazio para manter':'Cole o conteúdo solicitado'}">${field.secret?'':esc(field.value)}</textarea>`;
+    } else {
+      const type = field.secret ? 'password' : field.type === 'url' ? 'url' : field.type === 'number' ? 'number' : 'text';
+      const limits = field.type === 'number' ? `${field.min!=null?`min="${Number(field.min)}"`:''} ${field.max!=null?`max="${Number(field.max)}"`:''}` : `${field.minLength?`minlength="${Number(field.minLength)}"`:''}`;
+      control = `<input ${common} type="${type}" ${limits} value="${field.secret?'':esc(field.value)}" ${field.secret?'autocomplete="new-password"':''} placeholder="${field.secret?(field.configured?'Valor protegido — deixe vazio para manter':'Informe a chave privada'):(field.type==='url'?'URL segura HTTPS':'Informe o valor')}">`;
+    }
+    return `<label class="integration-field ${field.secret?'secret':''}"><span>${esc(field.label)} ${field.required?'<i>Obrigatório</i>':''} ${configured}</span><div class="integration-control">${control}${field.secret&&field.type!=='textarea'?`<button type="button" class="secret-eye" data-toggle-integration-secret aria-label="Mostrar ou ocultar ${esc(field.label)}">◉</button>`:''}</div></label>`;
+  }
+
+  function renderIntegrationCard(integration) {
+    const lastTest = integration.lastTest || {};
+    const testClass = lastTest.at ? (lastTest.ok ? 'ok' : 'error') : 'pending';
+    const testText = lastTest.at
+      ? `${lastTest.ok?'Teste aprovado':'Teste com falha'} · ${dateText(lastTest.at)} · ${lastTest.message || ''}`
+      : 'Ainda não testada. Salve e execute o teste antes de ativar.';
+    const statusClass = integration.enabled ? 'enabled' : 'disabled';
+    const canActivate = integration.configured && lastTest.ok;
+    return `<article class="integration-card ${statusClass}" data-integration-card="${esc(integration.id)}">
+      <header class="integration-card-head"><span class="integration-logo">${esc(integration.badge)}</span><div><h4>${esc(integration.name)}</h4><p>${esc(integration.description)}</p></div><span class="integration-status ${statusClass}">${integration.enabled?'Ativa':'Desativada'}</span></header>
+      <form data-integration-form data-integration-id="${esc(integration.id)}" autocomplete="off">
+        <div class="integration-fields">${(integration.fields || []).map(field => renderIntegrationField(integration, field)).join('')}</div>
+        <p class="integration-help">${esc(integration.help || '')}</p>
+        <div class="integration-test-state ${testClass}"><span>${lastTest.ok?'✓':lastTest.at?'!':'·'}</span><p>${esc(testText)}</p></div>
+        <footer class="integration-actions"><small>${Number(integration.configuredRequired || 0)}/${Number(integration.requiredCount || 0)} campos obrigatórios configurados</small><div><button type="submit" class="btn ghost compact">Salvar</button><button type="button" class="btn secondary compact" data-test-integration="${esc(integration.id)}">Salvar e testar</button><button type="button" class="btn ${integration.enabled?'danger':'primary'} compact" data-toggle-integration="${esc(integration.id)}" data-integration-enable="${integration.enabled?'false':'true'}" ${!integration.enabled&&!canActivate?'disabled title="Salve e teste com sucesso antes de ativar"':''}>${integration.enabled?'Desativar':'Ativar'}</button></div></footer>
+      </form>
+    </article>`;
+  }
+
   function renderAdminApi() {
     const block = state.admin?.api;
     const target = $('#api-keys-table');
     if (!target || !block) return;
+    const integrations = block.integrations?.items || [];
     const scopes = block.scopes || {};
     const scopeOptions = Object.keys(scopes).map(key => `<label class="check"><input type="checkbox" name="scopes" value="${esc(key)}"> ${esc(scopes[key])}</label>`).join('');
     const rows = (block.items || []).map(item => [
@@ -5296,8 +5336,63 @@
       dateText(item.createdAt), dateText(item.lastUsedAt),
       item.status === 'REVOGADA' ? '—' : `<div class="table-actions">${item.status==='ATIVA'?`<button class="link-btn" data-api-key-status="BLOQUEADA" data-api-key-id="${esc(item.id)}">Bloquear</button>`:`<button class="link-btn" data-api-key-status="ATIVA" data-api-key-id="${esc(item.id)}">Ativar</button>`}<button class="link-btn danger" data-api-key-status="REVOGADA" data-api-key-id="${esc(item.id)}">Revogar</button></div>`
     ]);
-    target.innerHTML = `<div class="settings-intro"><div><strong>API JSON do AUTENTIKO</strong><p>Integrações servidor a servidor podem consultar processos por protocolo/CPF e, com escopo específico, editar. A chave é exibida uma única vez e nunca fica gravada em texto claro.</p></div><span>${(block.items || []).length} integração(ões)</span></div><form id="api-key-form" class="config-card" autocomplete="off"><div class="form-grid two"><label>Nome da integração<input name="name" minlength="3" maxlength="120" required placeholder="Ex.: Portal de parceiros"></label><label>Limite por minuto<input name="rateLimit" type="number" min="1" max="600" value="60"></label><label>Expira em (opcional)<input name="expiresAt" type="datetime-local"></label><label>Descrição<input name="description" maxlength="500" placeholder="Finalidade e responsável"></label></div><fieldset><legend>Escopos</legend><div id="api-key-scopes" class="check-grid">${scopeOptions}</div></fieldset><div class="modal-actions"><button type="submit" class="btn primary compact">Gerar chave secreta</button></div><p class="hint">A chave começa com <code>ak_live_</code>. Guarde-a no cofre de segredos da integração; o AUTENTIKO não poderá recuperá-la.</p></form>${rows.length ? table(['Nome','Prefixo','Escopos','Status','Criada em','Último uso','Ações'], rows) : '<div class="empty-state">Nenhuma chave de integração criada.</div>'}`;
+    target.innerHTML = `<div class="settings-intro integration-intro"><div><strong>Central de APIs e integrações</strong><p>Preencha as URLs e chaves, teste cada conexão e ative somente as integrações aprovadas. Segredos salvos nunca retornam ao HTML.</p></div><span>${integrations.filter(item=>item.enabled).length}/${integrations.length} ativas</span></div>
+      <div class="integration-toolbar"><div><strong>Serviços conectados ao OK Nuvem</strong><p>Alterar uma credencial desativa a integração até um novo teste bem-sucedido.</p></div><button type="button" class="btn secondary compact" data-refresh-integrations>Atualizar status</button></div>
+      <div class="integration-grid">${integrations.map(renderIntegrationCard).join('')}</div>
+      <section class="api-access-section"><div class="settings-intro"><div><strong>Chaves de acesso à API JSON do AUTENTIKO</strong><p>Gere chaves para outros sistemas consultarem protocolos e CPFs, com escopos e limite de uso.</p></div><span>${(block.items || []).length} chave(s)</span></div>
+      <form id="api-key-form" class="config-card api-key-create-form" autocomplete="off"><div class="form-grid two"><label>Nome da integração<input name="name" minlength="3" maxlength="120" required placeholder="Ex.: Portal de parceiros"></label><label>Limite por minuto<input name="rateLimit" type="number" min="1" max="600" value="60"></label><label>Expira em (opcional)<input name="expiresAt" type="datetime-local"></label><label>Descrição<input name="description" maxlength="500" placeholder="Finalidade e responsável"></label></div><fieldset><legend>Escopos</legend><div id="api-key-scopes" class="check-grid">${scopeOptions}</div></fieldset><div class="modal-actions"><button type="submit" class="btn primary compact">Gerar chave secreta</button></div><p class="hint">A chave começa com <code>ak_live_</code>. Guarde-a no cofre da integração; o AUTENTIKO não poderá recuperá-la.</p></form>${rows.length ? table(['Nome','Prefixo','Escopos','Status','Criada em','Último uso','Ações'], rows) : '<div class="empty-state">Nenhuma chave de integração criada.</div>'}</section>`;
+    $$('[data-integration-form]', target).forEach(form => form.addEventListener('submit', submitIntegrationForm));
     $('#api-key-form').addEventListener('submit', submitApiKeyForm);
+  }
+
+  function integrationFormPayload(form) {
+    return Object.fromEntries(Array.from(form.elements).filter(control => control.name).map(control => [control.name, control.value.trim()]));
+  }
+
+  async function submitIntegrationForm(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!form.checkValidity()) return form.reportValidity();
+    const button = $('button[type=submit]', form);
+    setBusy(button, true, 'Salvando...');
+    try {
+      const result = await api('apiAdminSalvarIntegracao', state.token, form.dataset.integrationId, integrationFormPayload(form), {...state.context,requestId:requestId()});
+      toast(result.disabledForRetest?'Configuração salva. A integração foi desativada até um novo teste.':'Configuração protegida salva com sucesso.','success');
+      await loadAdmin('api', true);
+    } catch (error) { toast(error.message, 'error'); }
+    finally { if (button.isConnected) setBusy(button, false); }
+  }
+
+  async function testIntegration(button) {
+    const form = button.closest('[data-integration-form]');
+    if (!form || !form.checkValidity()) return form?.reportValidity();
+    setBusy(button, true, 'Testando...');
+    try {
+      await api('apiAdminSalvarIntegracao', state.token, form.dataset.integrationId, integrationFormPayload(form), {...state.context,requestId:requestId()});
+      const result = await api('apiAdminTestarIntegracao', state.token, form.dataset.integrationId, {}, {...state.context,requestId:requestId()});
+      toast(`${result.message} (${result.latencyMs} ms)`, result.success ? 'success' : 'error');
+      await loadAdmin('api', true);
+    } catch (error) { toast(error.message, 'error'); }
+    finally { if (button.isConnected) setBusy(button, false); }
+  }
+
+  async function toggleIntegration(button) {
+    const enabled = button.dataset.integrationEnable === 'true';
+    if (!confirm(`${enabled?'Ativar':'Desativar'} esta integração?`)) return;
+    setBusy(button, true, enabled?'Ativando...':'Desativando...');
+    try {
+      await api('apiAdminAlternarIntegracao', state.token, button.dataset.toggleIntegration, enabled, {...state.context,requestId:requestId()});
+      toast(`Integração ${enabled?'ativada':'desativada'} com sucesso.`, 'success');
+      await loadAdmin('api', true);
+    } catch (error) { toast(error.message, 'error'); }
+    finally { if (button.isConnected) setBusy(button, false); }
+  }
+
+  function toggleIntegrationSecret(button) {
+    const input = button.closest('.integration-control')?.querySelector('input');
+    if (!input) return;
+    input.type = input.type === 'password' ? 'text' : 'password';
+    button.classList.toggle('visible', input.type === 'text');
   }
 
   async function submitApiKeyForm(event) {
@@ -5805,6 +5900,10 @@
       const editDoc=event.target.closest('[data-edit-doc]');if(editDoc)return openDocModal(editDoc.dataset.editDoc);
       const editField=event.target.closest('[data-edit-field]');if(editField)return openFieldModal(editField.dataset.editField);
       const editModel=event.target.closest('[data-edit-contract-model]');if(editModel)return editContractModel(editModel.dataset.editContractModel);
+      const revealIntegrationSecret=event.target.closest('[data-toggle-integration-secret]');if(revealIntegrationSecret)return toggleIntegrationSecret(revealIntegrationSecret);
+      const testIntegrationButton=event.target.closest('[data-test-integration]');if(testIntegrationButton)return testIntegration(testIntegrationButton);
+      const toggleIntegrationButton=event.target.closest('[data-toggle-integration]');if(toggleIntegrationButton)return toggleIntegration(toggleIntegrationButton);
+      if(event.target.closest('[data-refresh-integrations]'))return loadAdmin('api',true);
       const apiKeyStatus=event.target.closest('[data-api-key-status]');if(apiKeyStatus)return changeApiKeyStatus(apiKeyStatus);
       if(event.target.closest('[data-add-contract-clause]'))return addContractClause();
       const removeClause=event.target.closest('[data-remove-contract-clause]');if(removeClause){const rows=$$('[data-contract-clause-row]');if(rows.length<=1)return toast('O modelo deve possuir ao menos uma cláusula.','error');removeClause.closest('[data-contract-clause-row]')?.remove();return;}

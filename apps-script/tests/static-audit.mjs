@@ -127,6 +127,19 @@ check('API JSON e gestão de chaves estão protegidas', () => {
   assert.match(indexHtml, /data-admin-tab="api"/);
 });
 
+check('central de integrações protege segredos e exige teste antes da ativação', () => {
+  assert.match(serverSource, /function apiAdminSalvarIntegracao\(/);
+  assert.match(serverSource, /function apiAdminTestarIntegracao\(/);
+  assert.match(serverSource, /function apiAdminAlternarIntegracao\(/);
+  assert.match(serverSource, /value:\s*field\.secret\s*\?\s*''\s*:\s*value/);
+  assert.match(serverSource, /Teste a integração com sucesso antes de ativá-la/);
+  assert.match(scriptsHtml, /data-integration-form/);
+  assert.match(scriptsHtml, /data-test-integration/);
+  assert.match(scriptsHtml, /data-toggle-integration/);
+  assert.match(stylesHtml, /\.integration-grid/);
+  assert.doesNotMatch(scriptsHtml, /AUT_INT_[A-Z0-9_]+/);
+});
+
 check('limites de entrada presentes no cliente e servidor', () => {
   assert.match(serverSource, /PAYLOAD_TOO_LARGE/);
   assert.match(serverSource, /FIELD_TOO_LARGE/);
