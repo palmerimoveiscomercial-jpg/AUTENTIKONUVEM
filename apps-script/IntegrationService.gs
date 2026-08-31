@@ -489,10 +489,16 @@ function apiAdminTestarIntegracao(token, integrationId, payload, context) {
     try {
       testResult = autIntegrationRunTest_(integration, values);
     } catch (testError) {
+      var testMessage = String(testError && testError.message || 'A integração não respondeu corretamente.');
+      var authorizationRequired = testMessage.indexOf('script.external_request') >= 0 ||
+        testMessage.indexOf('UrlFetchApp.fetch') >= 0;
       testResult = {
         success: false,
         httpStatus: Number(testError && testError.httpStatus || 0),
-        message: String(testError && testError.message || 'A integração não respondeu corretamente.').slice(0, 300)
+        authorizationRequired: authorizationRequired,
+        message: (authorizationRequired
+          ? 'Autorização externa pendente. No editor do Apps Script, execute AUTENTIKO_AUTORIZAR_INTEGRACOES com a conta que publicou o web app e aceite as permissões.'
+          : testMessage).slice(0, 300)
       };
     }
     testResult.latencyMs = Date.now() - started;

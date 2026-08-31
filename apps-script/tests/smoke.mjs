@@ -384,6 +384,9 @@ const context = vm.createContext({
   UrlFetchApp: {
     fetch(url, options = {}) {
       const parsed = new URL(String(url));
+      if (parsed.hostname === 'www.googleapis.com' && parsed.pathname === '/generate_204') {
+        return { getResponseCode: () => 204, getContentText: () => '' };
+      }
       if (parsed.pathname.endsWith('/api/health')) {
         return {
           getResponseCode: () => mediaHealthState.status,
@@ -526,7 +529,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, installedFormCount);
-  assert.equal(diagnostic.codeVersion, '2.8.1');
+  assert.equal(diagnostic.codeVersion, '2.8.2');
   assert.ok(diagnostic.maxFormCacheBytes < 90_000);
 });
 
@@ -571,6 +574,14 @@ check('API JSON cria chave sem armazenar segredo em claro', () => {
   assert.ok(row);
   assert.notEqual(row.CHAVE_HASH, integrationApiKey);
   assert.equal(context.apiV1Request_({ parameter: {} }, { action: 'health' }).ok, true);
+});
+
+check('autorização manual valida chamadas externas sem enviar dados', () => {
+  const result = context.AUTENTIKO_AUTORIZAR_INTEGRACOES();
+  assert.equal(result.ok, true);
+  assert.equal(result.externalRequestAuthorized, true);
+  assert.equal(result.httpStatus, 204);
+  assert.equal(result.account, 'palmer.imoveis.comercial@gmail.com');
 });
 
 check('cofre de integrações não devolve segredos e bloqueia ativação sem teste aprovado', () => {

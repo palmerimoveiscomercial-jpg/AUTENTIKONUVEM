@@ -47,6 +47,33 @@ function setupSystem() {
 }
 
 /**
+ * Execute manualmente esta função uma única vez no editor do Apps Script,
+ * usando a mesma conta que publicou o web app. O Google exibirá a tela de
+ * consentimento para UrlFetchApp e para os demais escopos declarados no
+ * appsscript.json. A rotina apenas faz leituras e um teste HTTP sem dados.
+ */
+function AUTENTIKO_AUTORIZAR_INTEGRACOES() {
+  var started = Date.now();
+  var response = UrlFetchApp.fetch('https://www.googleapis.com/generate_204', {
+    method: 'get',
+    followRedirects: false,
+    muteHttpExceptions: true
+  });
+  var status = Number(response.getResponseCode() || 0);
+  var account = String(Session.getEffectiveUser().getEmail() || 'CONTA_PUBLICADORA');
+  var result = {
+    ok: status === 204 || status === 200,
+    account: account,
+    externalRequestAuthorized: true,
+    httpStatus: status,
+    latencyMs: Date.now() - started,
+    message: 'Permissão de chamadas externas autorizada para ' + account + '. Volte ao OK Nuvem e execute o teste novamente.'
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+/**
  * Atalho operacional mantido neste arquivo para permitir que a migração
  * idempotente das bases cadastrais seja executada pela interface do Apps Script
  * sem precisar abrir o arquivo CommercialService.gs, que é consideravelmente

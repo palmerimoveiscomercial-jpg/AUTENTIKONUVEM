@@ -145,6 +145,7 @@
   const API_TIMEOUTS = {
     apiPublicBootstrap: 20000,
     apiBootstrap: 30000,
+    apiAquecerCacheAutopreenchimento: 90000,
     apiBuscarCadastroPorDocumento: 15000,
     apiUploadDocumentoForm: 180000,
     apiUploadDocumento: 180000,
@@ -763,9 +764,9 @@
     ['#database-map-btn','#database-rebuild-btn','#drive-rebuild-btn'].forEach(selector => $(selector)?.classList.toggle('hidden', !hasPermission('CONFIGURACAO_GERIR')));
     fillGlobalSelects();
     await loadProcesses('dashboard');
-    const warmPdf = () => { void loadPdfJs().catch(() => {}); };
-    if ('requestIdleCallback' in window) requestIdleCallback(warmPdf, {timeout:5000});
-    else setTimeout(warmPdf, 1800);
+    const warmLookup = () => { void api('apiAquecerCacheAutopreenchimento', state.token).catch(() => {}); };
+    if ('requestIdleCallback' in window) requestIdleCallback(warmLookup, {timeout:8000});
+    else setTimeout(warmLookup, 2500);
     if (user.mustChangePassword) openPasswordModal(true);
   }
 
@@ -5336,7 +5337,7 @@
       dateText(item.createdAt), dateText(item.lastUsedAt),
       item.status === 'REVOGADA' ? '—' : `<div class="table-actions">${item.status==='ATIVA'?`<button class="link-btn" data-api-key-status="BLOQUEADA" data-api-key-id="${esc(item.id)}">Bloquear</button>`:`<button class="link-btn" data-api-key-status="ATIVA" data-api-key-id="${esc(item.id)}">Ativar</button>`}<button class="link-btn danger" data-api-key-status="REVOGADA" data-api-key-id="${esc(item.id)}">Revogar</button></div>`
     ]);
-    target.innerHTML = `<div class="settings-intro integration-intro"><div><strong>Central de APIs e integrações</strong><p>Preencha as URLs e chaves, teste cada conexão e ative somente as integrações aprovadas. Segredos salvos nunca retornam ao HTML.</p></div><span>${integrations.filter(item=>item.enabled).length}/${integrations.length} ativas</span></div>
+    target.innerHTML = `<div class="settings-intro integration-intro"><div><strong>Central de APIs e integrações</strong><p>Preencha as URLs e chaves, teste cada conexão e ative somente as integrações aprovadas. Segredos salvos nunca retornam ao HTML.</p><p><strong>Primeira ativação:</strong> no editor do Apps Script, execute <code>AUTENTIKO_AUTORIZAR_INTEGRACOES</code> com a conta que publicou o web app e aceite as permissões do Google.</p></div><span>${integrations.filter(item=>item.enabled).length}/${integrations.length} ativas</span></div>
       <div class="integration-toolbar"><div><strong>Serviços conectados ao OK Nuvem</strong><p>Alterar uma credencial desativa a integração até um novo teste bem-sucedido.</p></div><button type="button" class="btn secondary compact" data-refresh-integrations>Atualizar status</button></div>
       <div class="integration-grid">${integrations.map(renderIntegrationCard).join('')}</div>
       <section class="api-access-section"><div class="settings-intro"><div><strong>Chaves de acesso à API JSON do AUTENTIKO</strong><p>Gere chaves para outros sistemas consultarem protocolos e CPFs, com escopos e limite de uso.</p></div><span>${(block.items || []).length} chave(s)</span></div>

@@ -130,6 +130,13 @@ check('API JSON e gestão de chaves estão protegidas', () => {
 check('central de integrações protege segredos e exige teste antes da ativação', () => {
   assert.match(serverSource, /function apiAdminSalvarIntegracao\(/);
   assert.match(serverSource, /function apiAdminTestarIntegracao\(/);
+  assert.match(serverSource, /function AUTENTIKO_AUTORIZAR_INTEGRACOES\(/);
+  assert.match(serverSource, /function apiAquecerCacheAutopreenchimento\(/);
+  assert.doesNotMatch(
+    serverSource.match(/function apiBootstrap\([\s\S]*?\n\}/)?.[0] || '',
+    /autMasterPrimeLookupCache_/,
+    'apiBootstrap não deve bloquear o login com pré-aquecimento pesado'
+  );
   assert.match(serverSource, /function apiAdminAlternarIntegracao\(/);
   assert.match(serverSource, /value:\s*field\.secret\s*\?\s*''\s*:\s*value/);
   assert.match(serverSource, /Teste a integração com sucesso antes de ativá-la/);

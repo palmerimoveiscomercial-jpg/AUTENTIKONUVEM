@@ -125,10 +125,6 @@ function apiPublicBootstrap() {
 function apiBootstrap(token) {
   try {
     var user = autRequireAuth_(token);
-    if (autHasPermission_(user, 'PROCESSO_CRIAR') || autHasPermission_(user, 'PROCESSO_EDITAR')) {
-      try { autMasterPrimeLookupCache_(); }
-      catch (lookupWarmError) { console.warn('Pré-aquecimento do autopreenchimento ignorado: ' + lookupWarmError.message); }
-    }
     return autResult_({
       user: autUserPublic_(user),
       config: autPublicConfig_(),
@@ -144,6 +140,16 @@ function apiBootstrap(token) {
       formSchemas: {},
       documentCatalog: autDocumentCatalog_()
     });
+  } catch (err) { return autPublicError_(err); }
+}
+
+function apiAquecerCacheAutopreenchimento(token) {
+  try {
+    var user = autRequireAuth_(token);
+    var allowed = autHasPermission_(user, 'PROCESSO_CRIAR') || autHasPermission_(user, 'PROCESSO_EDITAR');
+    if (!allowed) return autResult_({ warmed: false, reason: 'PERMISSION_NOT_APPLICABLE' });
+    autMasterPrimeLookupCache_();
+    return autResult_({ warmed: true });
   } catch (err) { return autPublicError_(err); }
 }
 
