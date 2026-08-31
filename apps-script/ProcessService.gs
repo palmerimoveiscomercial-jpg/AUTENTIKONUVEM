@@ -351,7 +351,7 @@ function apiCriarProcesso(token, payload, context) {
       TIPO_VINCULO: '',
       MIGRACAO_STATUS: 'NATIVO_V2'
     };
-    autAppend_('PROCESSOS', process);
+    process._row = autAppend_('PROCESSOS', process);
     var virtualRows = schema.filter(function(field) { return Object.prototype.hasOwnProperty.call(data, field.name); }).map(function(field) {
       var value = data[field.name];
       return {
@@ -375,9 +375,8 @@ function apiCriarProcesso(token, payload, context) {
         STATUS_ANTERIOR: '', STATUS_NOVO: 'RASCUNHO', USUARIO: user.NOME, CRIADO_EM: now
       });
     }
-    var persistedProcess = autFind_('PROCESSOS', 'ID_PROCESSO', id);
-    autBootstrapParticipantsFromProcess_(persistedProcess, user);
-    autSyncProcessMasterDataSafe_(user, persistedProcess, data, context, { source: 'PROCESSO_CRIADO' });
+    autBootstrapParticipantsFromProcess_(process, user, data);
+    autSyncProcessMasterDataSafe_(user, process, data, context, { source: 'PROCESSO_CRIADO' });
     autAudit_(user, 'PROCESSO_CRIADO', 'PROCESSO', id, { protocolo: protocol, tipo: type }, context);
     if (incomeEvaluation.applicable && !incomeEvaluation.adequate) {
       autAudit_(user, 'ACEITE_RENDA_INSUFICIENTE', 'PROCESSO', id, {
@@ -425,7 +424,7 @@ function apiAtualizarProcesso(token, processId, data, context) {
         ESTADO_CAMPO: data._fieldState && data._fieldState[field.name] || (value == null || value === '' ? 'PENDENTE_VALIDACAO' : 'INFORMADO')
       };
     });
-    autAppendMany_('PROCESSO_DADOS', nextDataRows);
+    var nextDataRowNumbers = autAppendMany_('PROCESSO_DADOS', nextDataRows, { skipSearch: true }) || [];
     autUpdateRow_('PROCESSOS', process._row, {
       RESPONSAVEL: data.responsavel_processo || process.RESPONSAVEL,
       CLIENTE_NOME: primaryParty.name, CLIENTE_CPF: primaryParty.cpf,
@@ -437,21 +436,29 @@ function apiAtualizarProcesso(token, processId, data, context) {
       ATUALIZADO_EM: now,
       VERSAO_REGISTRO: nextVersion
     });
-    var stagedRows = autRowsBy_('PROCESSO_DADOS', 'ID_PROCESSO', processId).filter(function(row) {
-      return String(row.LOTE_ATUALIZACAO || '') === batchId;
-    });
-    autPatchRows_('PROCESSO_DADOS', stagedRows.map(function(row) { return row._row; }), { ATIVO: 'SIM' });
+    autPatchRows_('PROCESSO_DADOS', nextDataRowNumbers, { ATIVO: 'SIM' }, { skipSearch: true });
     autPatchRows_('PROCESSO_DADOS', previousDataRows.map(function(row) { return row._row; }), {
       ATIVO: 'NAO', SUBSTITUIDO_EM: now
-    });
+    }, { skipSearch: true });
+    if (typeof autSearchIncrementalBatch_ === 'function') {
+      autSearchIncrementalBatch_('PROCESSO_DADOS', nextDataRowNumbers.concat(previousDataRows.map(function(row) { return row._row; })));
+    }
     autInvalidateProcessApprovals_(processId, 'Ficha cadastral alterada', context);
     autRowsBy_('PROCESSO_PARTICIPANTES', 'ID_PROCESSO', processId).filter(function(row) {
       return autJsonParse_(row.DADOS_JSON, {}).origem === 'FICHA_CADASTRAL';
     }).forEach(function(row) {
       autUpdateRow_('PROCESSO_PARTICIPANTES', row._row, { ATIVO: 'NAO', ATUALIZADO_EM: now, ATUALIZADO_POR: user.NOME });
     });
-    var refreshedProcess = autFind_('PROCESSOS', 'ID_PROCESSO', processId);
-    autBootstrapParticipantsFromProcess_(refreshedProcess, user);
+    var refreshedProcess = Object.assign({}, process, {
+      RESPONSAVEL: data.responsavel_processo || process.RESPONSAVEL,
+      CLIENTE_NOME: primaryParty.name, CLIENTE_CPF: primaryParty.cpf,
+      CLIENTE_RG: primaryParty.document, CLIENTE_EMAIL: primaryParty.email,
+      CLIENTE_CONTATO: primaryParty.contact, CLIENTE_ENDERECO: primaryParty.address,
+      TITULAR_NOME: data.titular_nome || '', IMOVEL_CODIGO: data.imovel_codigo || '',
+      IMOVEL_ENDERECO: data.imovel_endereco || data.imovel_localidade || '',
+      DADOS_JSON: autProcessSummaryJson_(data), ATUALIZADO_EM: now, VERSAO_REGISTRO: nextVersion
+    });
+    autBootstrapParticipantsFromProcess_(refreshedProcess, user, data);
     autSyncProcessMasterDataSafe_(user, refreshedProcess, data, context, { source: 'PROCESSO_EDITADO' });
     autAudit_(user, 'PROCESSO_ATUALIZADO', 'PROCESSO', processId, { protocolo: process.PROTOCOLO }, context);
     if (incomeEvaluation.applicable && !incomeEvaluation.adequate) {

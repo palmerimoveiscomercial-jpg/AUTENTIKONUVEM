@@ -529,7 +529,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, installedFormCount);
-  assert.equal(diagnostic.codeVersion, '2.8.2');
+  assert.equal(diagnostic.codeVersion, '2.8.3');
   assert.ok(diagnostic.maxFormCacheBytes < 90_000);
 });
 

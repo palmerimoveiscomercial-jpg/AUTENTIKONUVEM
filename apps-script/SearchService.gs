@@ -204,6 +204,83 @@ function autSearchIncremental_(table, rowNumber) {
   } catch (err) { console.warn('Atualização incremental do índice ignorada: ' + err.message); }
 }
 
+function autSearchReadRowsBatch_(table, rowNumbers) {
+  var sheet = autSheet_(table);
+  var headers = autHeaders_(sheet);
+  var lastRow = sheet.getLastRow();
+  var numbers = Array.from(new Set((rowNumbers || []).map(Number).filter(function(value) {
+    return isFinite(value) && value >= 2 && value <= lastRow;
+  }))).sort(function(a, b) { return a - b; });
+  if (!numbers.length) return [];
+  var groups = [];
+  var start = numbers[0];
+  var end = start;
+  for (var index = 1; index < numbers.length; index++) {
+    if (numbers[index] === end + 1) end = numbers[index];
+    else { groups.push({ start: start, count: end - start + 1 }); start = end = numbers[index]; }
+  }
+  groups.push({ start: start, count: end - start + 1 });
+  var rows = [];
+  groups.forEach(function(group) {
+    sheet.getRange(group.start, 1, group.count, headers.length).getValues().forEach(function(values, offset) {
+      var row = { _row: group.start + offset };
+      headers.forEach(function(header, column) { row[header] = values[column]; });
+      rows.push(row);
+    });
+  });
+  return rows;
+}
+
+function autSearchWriteUpdatesBatch_(updates) {
+  if (!updates || !updates.length) return;
+  var sheet = autSheet_('BUSCA_INDICE');
+  var headers = autHeaders_(sheet);
+  var ordered = updates.slice().sort(function(a, b) { return a.rowNumber - b.rowNumber; });
+  var groups = [];
+  var group = [ordered[0]];
+  for (var index = 1; index < ordered.length; index++) {
+    if (ordered[index].rowNumber === group[group.length - 1].rowNumber + 1) group.push(ordered[index]);
+    else { groups.push(group); group = [ordered[index]]; }
+  }
+  groups.push(group);
+  groups.forEach(function(items) {
+    var values = items.map(function(item) {
+      return headers.map(function(header) { return autSafeCell_(item.record[header]); });
+    });
+    sheet.getRange(items[0].rowNumber, 1, values.length, headers.length).setValues(values);
+  });
+}
+
+/**
+ * Atualiza o índice de várias linhas com poucas operações no Sheets. Antes,
+ * uma ficha com centenas de campos relia PROCESSOS e BUSCA_INDICE para cada
+ * campo, fazendo o salvamento ultrapassar o tempo limite do navegador.
+ */
+function autSearchIncrementalBatch_(table, rowNumbers) {
+  if (AUT_SEARCH_INDEX_GUARD_ || !autSearchSource_(table)) return;
+  try {
+    var rows = autSearchReadRowsBatch_(table, rowNumbers);
+    if (!rows.length) return;
+    var processMap = table === 'PROCESSOS' ? {} : autSearchProcessMap_();
+    var records = rows.map(function(row) {
+      return autSearchIndexRecord_(table, row, row._row, processMap);
+    }).filter(Boolean);
+    if (!records.length) return;
+    var indexedById = {};
+    autRows_('BUSCA_INDICE').forEach(function(row) { indexedById[String(row.ID_INDICE)] = row; });
+    var inserts = [];
+    var updates = [];
+    records.forEach(function(record) {
+      var existing = indexedById[String(record.ID_INDICE)];
+      if (existing) updates.push({ rowNumber: existing._row, record: record });
+      else inserts.push(record);
+    });
+    autSearchWriteUpdatesBatch_(updates);
+    autSearchWriteObjects_('BUSCA_INDICE', inserts);
+    CacheService.getScriptCache().remove('AUT_SEARCH_INDEX_ROWS');
+  } catch (err) { console.warn('Atualização em lote do índice ignorada: ' + err.message); }
+}
+
 function autSearchRemoveIncremental_(table, rowNumbers) {
   if (AUT_SEARCH_INDEX_GUARD_ || !autSearchSource_(table)) return;
   try {

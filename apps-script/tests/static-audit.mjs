@@ -518,6 +518,11 @@ check('hierarquia gerencial, sinal de roteamento e rascunho protegido', () => {
 });
 
 check('correções preventivas de desempenho, e-mail, privacidade e transições', () => {
+  assert.match(serverSource, /function autSearchIncrementalBatch_\(/);
+  assert.match(serverSource, /autAppendMany_\('PROCESSO_DADOS', nextDataRows, \{ skipSearch: true \}\)/);
+  assert.match(serverSource, /autSearchIncrementalBatch_\('PROCESSO_DADOS'/);
+  assert.match(scriptsHtml, /apiCriarProcesso:\s*180000/);
+  assert.match(scriptsHtml, /apiAtualizarProcesso:\s*180000/);
   assert.match(serverSource, /var AUTENTIKO_DB_INSTANCE_\s*=\s*null/);
   assert.match(serverSource, /if \(!AUTENTIKO_DB_INSTANCE_\)/);
   assert.match(serverSource, /AUTENTIKO_SHEET_INSTANCES_\[name\]/);

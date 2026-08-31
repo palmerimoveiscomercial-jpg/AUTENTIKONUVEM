@@ -123,11 +123,13 @@ function autParticipantFromProcessData_(process, data, prefix, roles, actor, ord
   };
 }
 
-function autBootstrapParticipantsFromProcess_(process, actor) {
+function autBootstrapParticipantsFromProcess_(process, actor, sourceData) {
   if (!process || !process.ID_PROCESSO || autRowsBy_('PROCESSO_PARTICIPANTES', 'ID_PROCESSO', process.ID_PROCESSO).some(function(row) {
     return String(row.ATIVO) !== 'NAO';
   })) return;
-  var data = typeof autProcessDataMap_ === 'function' ? autProcessDataMap_(process) : autJsonParse_(process.DADOS_JSON, {});
+  var data = sourceData && typeof sourceData === 'object'
+    ? sourceData
+    : (typeof autProcessDataMap_ === 'function' ? autProcessDataMap_(process) : autJsonParse_(process.DADOS_JSON, {}));
   var rows = [];
   var client = autParticipantFromProcessData_(process, data, 'cliente', [autPrimaryClientRole_(process.TIPO_PROCESSO)], actor, 10);
   var owner = autParticipantFromProcessData_(process, data, 'titular', ['PROPRIETARIO'], actor, 20);

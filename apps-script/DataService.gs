@@ -150,8 +150,9 @@ function autAppend_(name, obj) {
   });
 }
 
-function autAppendMany_(name, objects) {
+function autAppendMany_(name, objects, options) {
   if (!objects || !objects.length) return;
+  options = options || {};
   return autWithScriptLock_(function() {
     var sheet = autSheet_(name);
     var headers = autHeaders_(sheet);
@@ -160,9 +161,12 @@ function autAppendMany_(name, objects) {
     });
     var startRow = sheet.getLastRow() + 1;
     sheet.getRange(startRow, 1, values.length, headers.length).setValues(values);
-    if (typeof autSearchIncremental_ === 'function') {
-      for (var index = 0; index < values.length; index++) autSearchIncremental_(name, startRow + index);
+    var rowNumbers = values.map(function(unused, index) { return startRow + index; });
+    if (!options.skipSearch && typeof autSearchIncremental_ === 'function') {
+      if (typeof autSearchIncrementalBatch_ === 'function') autSearchIncrementalBatch_(name, rowNumbers);
+      else rowNumbers.forEach(function(rowNumber) { autSearchIncremental_(name, rowNumber); });
     }
+    return rowNumbers;
   });
 }
 
@@ -184,8 +188,9 @@ function autUpdateRow_(name, rowNumber, patch) {
   });
 }
 
-function autPatchRows_(name, rowNumbers, patch) {
+function autPatchRows_(name, rowNumbers, patch, options) {
   if (!rowNumbers || !rowNumbers.length || !patch) return;
+  options = options || {};
   return autWithScriptLock_(function() {
     var sheet = autSheet_(name);
     var headers = autHeaders_(sheet);
@@ -216,10 +221,12 @@ function autPatchRows_(name, rowNumbers, patch) {
         });
       });
       range.setValues(values);
-      if (typeof autSearchIncremental_ === 'function') {
-        for (var rowOffset = 0; rowOffset < values.length; rowOffset++) autSearchIncremental_(name, group.start + rowOffset);
-      }
     });
+    if (!options.skipSearch && typeof autSearchIncremental_ === 'function') {
+      if (typeof autSearchIncrementalBatch_ === 'function') autSearchIncrementalBatch_(name, numbers);
+      else numbers.forEach(function(rowNumber) { autSearchIncremental_(name, rowNumber); });
+    }
+    return numbers;
   });
 }
 
