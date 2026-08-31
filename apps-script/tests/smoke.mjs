@@ -529,7 +529,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, installedFormCount);
-  assert.equal(diagnostic.codeVersion, '2.8.3');
+  assert.equal(diagnostic.codeVersion, '2.8.4');
   assert.ok(diagnostic.maxFormCacheBytes < 90_000);
 });
 
@@ -558,6 +558,25 @@ check('login com senha temporária gerada', () => {
   token = login.token;
   assert.ok(token.length > 20);
   assert.equal(login.user.role, 'DESENVOLVEDOR');
+});
+
+check('sessão autenticada usa cache seguro e invalidação explícita', () => {
+  const tokenHash = context.autHash_(token);
+  const cacheKey = context.autSessionCacheKeyFromHash_(tokenHash);
+  const cached = JSON.parse(cache.get(cacheKey));
+  assert.equal(cached.user.SENHA_HASH, undefined);
+  assert.equal(cached.user.SALT, undefined);
+  const originalFind = context.autFind_;
+  context.autFind_ = (name, key, value) => {
+    if (name === 'SESSOES' || name === 'USUARIOS') throw new Error(`Leitura de autenticação inesperada: ${name}`);
+    return originalFind(name, key, value);
+  };
+  try { assert.equal(data(context.apiBootstrap(token)).user.role, 'DESENVOLVEDOR'); }
+  finally { context.autFind_ = originalFind; }
+  context.autInvalidateUserSessionCaches_(cached.user.ID_USUARIO);
+  assert.equal(cache.get(cacheKey), null);
+  assert.equal(data(context.apiBootstrap(token)).user.role, 'DESENVOLVEDOR');
+  assert.ok(cache.get(cacheKey));
 });
 
 let integrationApiKey;

@@ -32,12 +32,87 @@ function autFindUserLogin_(login) {
   return autFind_('USUARIOS', 'EMAIL', targetEmail) || autFind_('USUARIOS', 'USUARIO', String(login || '').trim());
 }
 
+var AUT_SESSION_CACHE_PREFIX_ = 'AUT_SESSION_V2_';
+var AUT_SESSION_CACHE_TTL_SECONDS_ = 1800;
+
+function autSessionCacheKeyFromHash_(tokenHash) {
+  return AUT_SESSION_CACHE_PREFIX_ + String(tokenHash || '');
+}
+
+function autSessionSafeUser_(user) {
+  var safe = {};
+  var blocked = {
+    SENHA_HASH: true,
+    SALT: true,
+    TENTATIVAS_FALHAS: true,
+    BLOQUEADO_ATE: true
+  };
+  Object.keys(user || {}).forEach(function(key) {
+    if (!blocked[key]) safe[key] = user[key];
+  });
+  return safe;
+}
+
+function autCacheSession_(rawToken, session, user) {
+  try {
+    var tokenHash = autHash_(String(rawToken || ''));
+    var remainingSeconds = Math.floor((autDateMs_(session.EXPIRA_EM) - Date.now()) / 1000);
+    if (!tokenHash || remainingSeconds < 1) return false;
+    return autCachePut_(CacheService.getScriptCache(), autSessionCacheKeyFromHash_(tokenHash), {
+      session: {
+        id: session.ID_SESSAO,
+        userId: session.ID_USUARIO,
+        createdAt: session.CRIADO_EM,
+        expiresAt: session.EXPIRA_EM,
+        row: session._row || 0
+      },
+      user: autSessionSafeUser_(user)
+    }, Math.min(AUT_SESSION_CACHE_TTL_SECONDS_, remainingSeconds));
+  } catch (error) {
+    console.warn('Não foi possível manter a sessão no cache: ' + error.message);
+    return false;
+  }
+}
+
+function autRemoveSessionCacheByHash_(tokenHash) {
+  if (!tokenHash) return;
+  try { CacheService.getScriptCache().remove(autSessionCacheKeyFromHash_(tokenHash)); }
+  catch (error) { console.warn('Não foi possível invalidar a sessão no cache: ' + error.message); }
+}
+
+function autInvalidateUserSessionCaches_(userId) {
+  if (!userId) return;
+  try {
+    var keys = autRowsBy_('SESSOES', 'ID_USUARIO', userId).map(function(row) {
+      return row.TOKEN_HASH ? autSessionCacheKeyFromHash_(row.TOKEN_HASH) : '';
+    }).filter(Boolean);
+    if (keys.length) CacheService.getScriptCache().removeAll(keys);
+  } catch (error) {
+    console.warn('Não foi possível invalidar as sessões do usuário no cache: ' + error.message);
+  }
+}
+
+function autAuthorizeSession_(session, user, permission) {
+  autAssert_(session && !session.REVOGADO_EM, 'Sessão inválida ou encerrada.', 'AUTH_REQUIRED');
+  autAssert_(autDateMs_(session.EXPIRA_EM || session.expiresAt) > Date.now(), 'Sua sessão expirou. Entre novamente.', 'SESSION_EXPIRED');
+  autAssert_(user && user.STATUS === 'ATIVO', 'Usuário bloqueado ou inativo.', 'USER_INACTIVE');
+  var config = autConfigMap_();
+  if (config.MODO_MANUTENCAO && user.PERFIL !== 'DESENVOLVEDOR') {
+    autAssert_(false, config.MENSAGEM_MANUTENCAO || 'Sistema em manutenção.', 'MAINTENANCE');
+  }
+  if (permission) autAssert_(autHasPermission_(user, permission), 'Você não tem permissão para esta ação.', 'FORBIDDEN');
+  user._sessionId = session.ID_SESSAO || session.id;
+  user._sessionCreatedAt = session.CRIADO_EM || session.createdAt;
+  user._sessionRow = session._row || session.row || 0;
+  return user;
+}
+
 function autCreateSession_(user, context) {
   var token = autToken_();
   var created = new Date();
   var expires = new Date(created.getTime() + AUTENTIKO.SESSION_HOURS * 60 * 60 * 1000);
   var ctx = autContext_(context);
-  autAppend_('SESSOES', {
+  var session = {
     ID_SESSAO: autUuid_(),
     ID_USUARIO: user.ID_USUARIO,
     TOKEN_HASH: autHash_(token),
@@ -46,26 +121,35 @@ function autCreateSession_(user, context) {
     REVOGADO_EM: '',
     DISPOSITIVO_JSON: autJson_(ctx.dispositivo),
     LOCALIZACAO_JSON: autJson_(ctx.localizacao)
-  });
+  };
+  session._row = autAppend_('SESSOES', session);
+  autCacheSession_(token, session, user);
   return { token: token, expiresAt: expires.toISOString(), user: autUserPublic_(user) };
 }
 
 function autRequireAuth_(token, permission) {
   var rawToken = String(token || '');
   autAssert_(rawToken && rawToken.length <= 256, 'Sessão não informada ou inválida.', 'AUTH_REQUIRED');
-  var session = autFind_('SESSOES', 'TOKEN_HASH', autHash_(rawToken));
+  var tokenHash = autHash_(rawToken);
+  var cacheKey = autSessionCacheKeyFromHash_(tokenHash);
+  var cached = autJsonParse_(CacheService.getScriptCache().get(cacheKey), null);
+  if (cached && cached.session && cached.user) {
+    try {
+      return autAuthorizeSession_(cached.session, cached.user, permission);
+    } catch (cachedError) {
+      if (['AUTH_REQUIRED', 'SESSION_EXPIRED', 'USER_INACTIVE'].indexOf(cachedError.code) >= 0) {
+        autRemoveSessionCacheByHash_(tokenHash);
+      }
+      throw cachedError;
+    }
+  }
+  var session = autFind_('SESSOES', 'TOKEN_HASH', tokenHash);
   autAssert_(session && !session.REVOGADO_EM, 'Sessão inválida ou encerrada.', 'AUTH_REQUIRED');
   autAssert_(autDateMs_(session.EXPIRA_EM) > Date.now(), 'Sua sessão expirou. Entre novamente.', 'SESSION_EXPIRED');
   var user = autFind_('USUARIOS', 'ID_USUARIO', session.ID_USUARIO);
-  autAssert_(user && user.STATUS === 'ATIVO', 'Usuário bloqueado ou inativo.', 'USER_INACTIVE');
-  var config = autConfigMap_();
-  if (config.MODO_MANUTENCAO && user.PERFIL !== 'DESENVOLVEDOR') {
-    autAssert_(false, config.MENSAGEM_MANUTENCAO || 'Sistema em manutenção.', 'MAINTENANCE');
-  }
-  if (permission) autAssert_(autHasPermission_(user, permission), 'Você não tem permissão para esta ação.', 'FORBIDDEN');
-  user._sessionId = session.ID_SESSAO;
-  user._sessionCreatedAt = session.CRIADO_EM;
-  return user;
+  var authorized = autAuthorizeSession_(session, user, permission);
+  autCacheSession_(rawToken, session, authorized);
+  return authorized;
 }
 
 function apiLogin(payload) {
@@ -102,8 +186,12 @@ function apiLogin(payload) {
 function apiLogout(token, context) {
   try {
     var user = autRequireAuth_(token);
-    var session = autFind_('SESSOES', 'TOKEN_HASH', autHash_(token));
+    var tokenHash = autHash_(token);
+    var session = user._sessionRow ? autRowAt_('SESSOES', user._sessionRow) : autFind_('SESSOES', 'TOKEN_HASH', tokenHash);
+    if (!session || session.TOKEN_HASH !== tokenHash) session = autFind_('SESSOES', 'TOKEN_HASH', tokenHash);
+    autAssert_(session && session.TOKEN_HASH === tokenHash, 'Sessão inválida ou encerrada.', 'AUTH_REQUIRED');
     autUpdateRow_('SESSOES', session._row, { REVOGADO_EM: autNow_() });
+    autRemoveSessionCacheByHash_(tokenHash);
     autAudit_(user, 'LOGOUT', 'USUARIO', user.ID_USUARIO, {}, context);
     return autResult_({ loggedOut: true });
   } catch (err) { return autPublicError_(err); }
@@ -247,6 +335,7 @@ function apiRedefinirSenha(email, token, newPassword, context) {
     autRows_('SESSOES').filter(function(row) { return row.ID_USUARIO === user.ID_USUARIO && !row.REVOGADO_EM; }).forEach(function(row) {
       autUpdateRow_('SESSOES', row._row, { REVOGADO_EM: autNow_() });
     });
+    autInvalidateUserSessionCaches_(user.ID_USUARIO);
     autAudit_(user, 'SENHA_REDEFINIDA', 'USUARIO', user.ID_USUARIO, {}, context);
     return autResult_({ message: 'Senha atualizada. Entre novamente.' });
   } catch (err) { return autPublicError_(err); }

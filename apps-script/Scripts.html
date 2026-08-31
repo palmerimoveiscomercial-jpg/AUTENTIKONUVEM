@@ -182,6 +182,7 @@
     maxEntryBytes: 8 * 1024 * 1024,
     documentTtlMs: 7 * 24 * 60 * 60 * 1000,
     thumbnailTtlMs: 7 * 24 * 60 * 60 * 1000,
+    processListTtlMs: 2 * 60 * 1000,
     processTabTtlMs: 5 * 60 * 1000,
     processShellTtlMs: 60 * 1000,
     formSchemaTtlMs: 12 * 60 * 60 * 1000
@@ -342,7 +343,11 @@
   async function browserCachePut(kind, identity, blob, metadata = {}) {
     if (!(blob instanceof Blob) || !blob.size || blob.size > BROWSER_CACHE.maxEntryBytes) return false;
     const now = Date.now();
-    const ttl = kind === 'thumbnail' ? BROWSER_CACHE.thumbnailTtlMs : BROWSER_CACHE.documentTtlMs;
+    const ttl = kind === 'thumbnail'
+      ? BROWSER_CACHE.thumbnailTtlMs
+      : kind === 'process-list'
+        ? BROWSER_CACHE.processListTtlMs
+        : BROWSER_CACHE.documentTtlMs;
     const entry = {
       key:browserCacheKey(kind, identity),
       namespace:state.browserCacheNamespace,
@@ -367,6 +372,23 @@
       state.browserCacheMemory.delete(entry.key);
       return false;
     }
+  }
+
+  async function browserCacheGetJson(kind, identity) {
+    const entry = await browserCacheGet(kind, identity);
+    if (!entry?.blob) return null;
+    try { return JSON.parse(await entry.blob.text()); }
+    catch (error) {
+      void browserCacheDelete(kind, identity);
+      return null;
+    }
+  }
+
+  async function browserCachePutJson(kind, identity, value) {
+    try {
+      const blob = new Blob([JSON.stringify(value)], {type:'application/json'});
+      return browserCachePut(kind, identity, blob, {mimeType:'application/json'});
+    } catch (error) { return false; }
   }
 
   async function browserCacheDelete(kind, identity) {
@@ -765,7 +787,7 @@
     $('#database-nav').classList.toggle('hidden', !databaseAccess);
     ['#database-map-btn','#database-rebuild-btn','#drive-rebuild-btn'].forEach(selector => $(selector)?.classList.toggle('hidden', !hasPermission('CONFIGURACAO_GERIR')));
     fillGlobalSelects();
-    await loadProcesses('dashboard');
+    void loadProcesses('dashboard').catch(() => {});
     const warmLookup = () => { void api('apiAquecerCacheAutopreenchimento', state.token).catch(() => {}); };
     if ('requestIdleCallback' in window) requestIdleCallback(warmLookup, {timeout:8000});
     else setTimeout(warmLookup, 2500);
@@ -823,16 +845,39 @@
     return {search:$('#process-search').value, status:$('#process-status').value, type:$('#process-type').value, mine:$('#process-mine').checked, pageSize:100};
   }
 
+  function processListCacheIdentity(mode, filters) {
+    return `${mode}|${JSON.stringify(filters || {})}`;
+  }
+
   async function loadProcesses(mode = 'dashboard', options = {}) {
     const target = mode === 'dashboard' ? $('#dashboard-processes') : $('#all-processes');
-    if (!options.silent) target.innerHTML = '<div class="empty-state">Carregando processos...</div>';
-    try {
-      const result = await api('apiListarProcessos', state.token, processFilters(mode));
+    const filters = processFilters(mode);
+    const identity = processListCacheIdentity(mode, filters);
+    const requestIsCurrent = () => processListCacheIdentity(mode, processFilters(mode)) === identity;
+    const applyResult = result => {
+      if (!requestIsCurrent() || !Array.isArray(result?.items)) return;
       state.processes = result.items;
       renderProcesses(target, result.items);
       renderMetrics(result.dashboard);
+    };
+    const cached = options.force ? null : await browserCacheGetJson('process-list', identity);
+    if (cached && Array.isArray(cached.items)) applyResult(cached);
+    else if (!options.silent) target.innerHTML = '<div class="empty-state">Carregando processos...</div>';
+    const refresh = async () => {
+      const result = await api('apiListarProcessos', state.token, filters);
+      void browserCachePutJson('process-list', identity, result);
+      applyResult(result);
+      return result;
+    };
+    if (cached && Array.isArray(cached.items) && !options.force) {
+      void refresh().catch(() => {});
+      return cached;
+    }
+    try {
+      return await refresh();
     } catch (error) {
       if (!options.silent) target.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
+      return null;
     }
   }
 
@@ -3244,7 +3289,7 @@
     clearTimeout(state.processListRefreshTimer);
     state.processListRefreshTimer = setTimeout(() => {
       const mode = $('.nav-btn.active')?.dataset.view === 'processes' ? 'processes' : 'dashboard';
-      const refresh = () => loadProcesses(mode, {silent:true}).catch(() => {});
+      const refresh = () => loadProcesses(mode, {silent:true, force:true}).catch(() => {});
       if (globalThis.requestIdleCallback) requestIdleCallback(refresh, {timeout:2000});
       else refresh();
     }, 3500);

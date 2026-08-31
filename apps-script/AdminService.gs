@@ -61,6 +61,7 @@ function apiSalvarUsuario(token, payload, context) {
         NOME: name, EMAIL: email, USUARIO: username, PERFIL: role, STATUS: status,
         PERMISSOES_JSON: JSON.stringify(permissions), ATUALIZADO_EM: autNow_()
       });
+      autInvalidateUserSessionCaches_(existing.ID_USUARIO);
       autAudit_(actor, 'USUARIO_ATUALIZADO', 'USUARIO', existing.ID_USUARIO, { perfil: role, status: status, permissoes: permissions }, context);
       return autResult_({ id: existing.ID_USUARIO, updated: true });
     }
@@ -96,6 +97,7 @@ function apiAcaoUsuario(token, userId, action, context) {
     if (nextStatus === 'BLOQUEADO' || nextStatus === 'EXCLUIDO') {
       autRows_('SESSOES').filter(function(row) { return row.ID_USUARIO === userId && !row.REVOGADO_EM; }).forEach(function(row) { autUpdateRow_('SESSOES', row._row, { REVOGADO_EM: autNow_() }); });
     }
+    autInvalidateUserSessionCaches_(userId);
     autAudit_(actor, 'USUARIO_' + action, 'USUARIO', userId, { statusAnterior: user.STATUS, statusNovo: nextStatus }, context);
     return autResult_({ status: nextStatus });
   } catch (err) { return autPublicError_(err); }
@@ -115,6 +117,7 @@ function apiDefinirSenhaUsuario(token, userId, newPassword, context) {
     var salt = autRandom_(24);
     autUpdateRow_('USUARIOS', user._row, { SENHA_HASH: autPasswordHash_(password, salt), SALT: salt, ATUALIZADO_EM: autNow_(), TENTATIVAS_FALHAS: 0, BLOQUEADO_ATE: '', DEVE_TROCAR_SENHA: 'SIM' });
     autRows_('SESSOES').filter(function(row) { return row.ID_USUARIO === userId && !row.REVOGADO_EM; }).forEach(function(row) { autUpdateRow_('SESSOES', row._row, { REVOGADO_EM: autNow_() }); });
+    autInvalidateUserSessionCaches_(userId);
     autAudit_(actor, 'SENHA_USUARIO_DEFINIDA', 'USUARIO', userId, {}, context);
     return autResult_({ updated: true });
   } catch (err) { return autPublicError_(err); }
@@ -136,6 +139,7 @@ function apiTrocarMinhaSenha(token, currentPassword, newPassword, context) {
     autRows_('SESSOES').filter(function(row) {
       return row.ID_USUARIO === user.ID_USUARIO && !row.REVOGADO_EM && row.TOKEN_HASH !== currentHash;
     }).forEach(function(row) { autUpdateRow_('SESSOES', row._row, { REVOGADO_EM: autNow_() }); });
+    autInvalidateUserSessionCaches_(user.ID_USUARIO);
     autAudit_(user, 'PROPRIA_SENHA_ALTERADA', 'USUARIO', user.ID_USUARIO, {}, context);
     return autResult_({ updated: true });
   } catch (err) { return autPublicError_(err); }

@@ -343,7 +343,9 @@ check('modal estável com quatro abas e carregamento sob demanda', () => {
   assert.match(serverSource, /REGISTRATION:\s*'CADASTRO'/);
   assert.match(scriptsHtml, /function syncProcessAfterMutation/);
   assert.match(scriptsHtml, /function applySavedProcessFormLocally/);
-  assert.match(scriptsHtml, /loadProcesses\(mode, \{silent:true\}\)/);
+  assert.match(scriptsHtml, /loadProcesses\(mode, \{silent:true, force:true\}\)/);
+  assert.match(scriptsHtml, /browserCacheGetJson\('process-list', identity\)/);
+  assert.match(scriptsHtml, /void loadProcesses\('dashboard'\)/);
   assert.doesNotMatch(scriptsHtml, /Promise\.all\(\[loadProcesses\('dashboard'\), openProcess/);
   assert.match(scriptsHtml, /if \(payload\.formFields\) next\.formFields = payload\.formFields/);
   assert.match(scriptsHtml, /const shellCached = getProcessShellCache\(id\)/);
