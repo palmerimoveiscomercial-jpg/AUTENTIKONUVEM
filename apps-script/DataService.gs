@@ -1,6 +1,231 @@
 var AUTENTIKO_DB_INSTANCE_ = null;
 var AUTENTIKO_SHEET_INSTANCES_ = {};
 
+var AUTENTIKO_REQUEST_TABLES_ = {};
+var AUTENTIKO_OPERATIONAL_BATCH_VERSION_ = '2.9.1';
+var AUTENTIKO_OPERATIONAL_TABLE_NAMES_ = [
+  'CONFIGURACOES', 'USUARIOS', 'PROCESSOS', 'PROCESSO_DADOS', 'FORMULARIOS',
+  'DOCUMENTOS_CATALOGO', 'PROCESSO_DOCUMENTOS', 'PROCESSO_PARTICIPANTES',
+  'PENDENCIAS', 'ATUACOES', 'MOVIMENTACOES_PROCESSO', 'PROCESSO_CHECKLIST',
+  'ACEITES_ELETRONICOS', 'PROPOSTAS', 'CONTRATOS', 'LISTAS'
+];
+var AUTENTIKO_OPERATIONAL_REVISION_TABLES_ = {
+  PROCESSOS:true, PROCESSO_DADOS:true, FORMULARIOS:true, DOCUMENTOS_CATALOGO:true,
+  PROCESSO_DOCUMENTOS:true, PROCESSO_PARTICIPANTES:true, PENDENCIAS:true, ATUACOES:true,
+  MOVIMENTACOES_PROCESSO:true, PROCESSO_CHECKLIST:true, ACEITES_ELETRONICOS:true,
+  PROPOSTAS:true, CONTRATOS:true, LISTAS:true
+};
+
+function autUtf8Bytes_(text) {
+  return Utilities.newBlob(String(text || ''), 'text/plain').getBytes().length;
+}
+
+function autLargeCachePut_(cache, key, value, expirationSeconds) {
+  try {
+    var text = typeof value === 'string' ? value : JSON.stringify(value);
+    var chunks = [];
+    var cursor = 0;
+    while (cursor < text.length) {
+      var end = Math.min(cursor + 42000, text.length);
+      var chunk = text.slice(cursor, end);
+      while (autUtf8Bytes_(chunk) > 88000 && end > cursor + 1000) {
+        end = cursor + Math.floor((end - cursor) * 0.75);
+        chunk = text.slice(cursor, end);
+      }
+      chunks.push(chunk);
+      cursor = end;
+    }
+    var oldManifest = autJsonParse_(cache.get(key + ':manifest'), null);
+    if (oldManifest && Number(oldManifest.chunks || 0) > chunks.length) {
+      var oldKeys = [];
+      for (var oldIndex = chunks.length; oldIndex < Number(oldManifest.chunks || 0); oldIndex++) oldKeys.push(key + ':' + oldIndex);
+      if (oldKeys.length) cache.removeAll(oldKeys);
+    }
+    chunks.forEach(function(chunk, index) { cache.put(key + ':' + index, chunk, expirationSeconds); });
+    cache.put(key + ':manifest', JSON.stringify({ chunks:chunks.length, bytes:autUtf8Bytes_(text), at:autNow_() }), expirationSeconds);
+    return true;
+  } catch (error) {
+    console.warn('Cache grande indisponível para ' + key + ': ' + error.message);
+    return false;
+  }
+}
+
+function autLargeCacheGet_(cache, key) {
+  try {
+    var manifest = autJsonParse_(cache.get(key + ':manifest'), null);
+    if (!manifest || !Number(manifest.chunks || 0)) return null;
+    var text = '';
+    for (var index = 0; index < Number(manifest.chunks); index++) {
+      var chunk = cache.get(key + ':' + index);
+      if (chunk == null) return null;
+      text += chunk;
+    }
+    return autJsonParse_(text, null);
+  } catch (error) {
+    console.warn('Não foi possível recuperar cache grande ' + key + ': ' + error.message);
+    return null;
+  }
+}
+
+function autOperationalRevision_() {
+  return PropertiesService.getScriptProperties().getProperty('AUT_OPERATIONAL_REVISION') || '0';
+}
+
+function autTouchOperationalRevision_(name) {
+  if (!AUTENTIKO_OPERATIONAL_REVISION_TABLES_[String(name || '')]) return autOperationalRevision_();
+  var revision = String(Date.now()) + '-' + autRandom_(6);
+  PropertiesService.getScriptProperties().setProperty('AUT_OPERATIONAL_REVISION', revision);
+  return revision;
+}
+
+function autOperationalExternalMarker_() {
+  var modified = '';
+  try { modified = String(DriveApp.getFileById(AUTENTIKO.SPREADSHEET_ID).getLastUpdated().getTime()); }
+  catch (ignore) { modified = 'drive-unavailable'; }
+  return [AUTENTIKO_OPERATIONAL_BATCH_VERSION_, autOperationalRevision_(), modified].join('|');
+}
+
+function autRequestTable_(name) {
+  return AUTENTIKO_REQUEST_TABLES_[String(name || '')] || null;
+}
+
+function autSetRequestTable_(name, headers, values) {
+  headers = (headers || []).map(function(value) { return String(value || '').trim(); });
+  var rows = (values || []).map(function(row, index) {
+    var obj = { _row:index + 2 };
+    headers.forEach(function(header, col) { if (header) obj[header] = row[col] == null ? '' : row[col]; });
+    return obj;
+  });
+  AUTENTIKO_REQUEST_TABLES_[name] = { name:name, headers:headers, rows:rows, indexes:{} };
+  return AUTENTIKO_REQUEST_TABLES_[name];
+}
+
+function autRequestTableIndex_(table, key) {
+  if (!table || !key) return {};
+  table.indexes = table.indexes || {};
+  if (!table.indexes[key]) {
+    var index = {};
+    (table.rows || []).forEach(function(row) {
+      var normalized = autNormalize_(row[key]);
+      if (!index[normalized]) index[normalized] = [];
+      index[normalized].push(row);
+    });
+    table.indexes[key] = index;
+  }
+  return table.indexes[key];
+}
+
+function autRequestTablePatchRow_(name, rowNumber, patch) {
+  var table = autRequestTable_(name);
+  if (!table) return;
+  var row = table.rows.filter(function(item) { return Number(item._row) === Number(rowNumber); })[0];
+  if (!row) return;
+  Object.keys(patch || {}).forEach(function(key) {
+    if (table.headers.indexOf(key) >= 0) row[key] = autSafeCell_(patch[key]);
+  });
+  table.indexes = {};
+}
+
+function autRequestTableAppend_(name, rowNumber, obj) {
+  var table = autRequestTable_(name);
+  if (!table) return;
+  var row = { _row:Number(rowNumber) };
+  table.headers.forEach(function(header) { row[header] = autSafeCell_(obj[header]); });
+  table.rows.push(row);
+  table.indexes = {};
+}
+
+function autRequestTableInvalidate_(name) {
+  delete AUTENTIKO_REQUEST_TABLES_[String(name || '')];
+}
+
+function autOperationalTransportCell_(value) {
+  if (value == null) return '';
+  if (value instanceof Date) return Utilities.formatDate(value, AUTENTIKO.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ssXXX");
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string') return value;
+  if (typeof value === 'object') {
+    try { return JSON.parse(JSON.stringify(value)); }
+    catch (ignore) { return String(value); }
+  }
+  return String(value);
+}
+
+function autOperationalSpreadsheetFallback_(names) {
+  var db = autDb_();
+  var tables = {};
+  (names || []).forEach(function(name) {
+    var sheet = db.getSheetByName(name);
+    if (!sheet) { tables[name] = { headers:[], values:[] }; return; }
+    var rows = Math.max(sheet.getLastRow(), 1);
+    var cols = Math.max(sheet.getLastColumn(), 1);
+    var raw = sheet.getRange(1, 1, rows, cols).getValues();
+    var values = raw.map(function(row) { return row.map(autOperationalTransportCell_); });
+    tables[name] = { headers:values.length ? values[0] : [], values:values.slice(1) };
+  });
+  return tables;
+}
+
+function autOperationalBatchGet_(names) {
+  names = (names || AUTENTIKO_OPERATIONAL_TABLE_NAMES_).filter(function(name, index, list) {
+    return name && list.indexOf(name) === index;
+  });
+  try {
+    var query = names.map(function(name) { return 'ranges=' + encodeURIComponent(name); }).join('&');
+    var url = 'https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(AUTENTIKO.SPREADSHEET_ID) +
+      '/values:batchGet?majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING&' + query;
+    var response = UrlFetchApp.fetch(url, {
+      method:'get',
+      headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions:true
+    });
+    var status = Number(response.getResponseCode() || 0);
+    if (status < 200 || status >= 300) {
+      console.warn('Sheets batchGet retornou HTTP ' + status + '. O login seguirá pelo fallback SpreadsheetApp.');
+      return autOperationalSpreadsheetFallback_(names);
+    }
+    var payload = autJsonParse_(response.getContentText(), {});
+    var tables = {};
+    (payload.valueRanges || []).forEach(function(range, index) {
+      var name = names[index];
+      var values = Array.isArray(range.values) ? range.values : [];
+      var headers = values.length ? values[0] : [];
+      tables[name] = { headers:headers, values:values.slice(1) };
+    });
+    names.forEach(function(name) { if (!tables[name]) tables[name] = { headers:[], values:[] }; });
+    return tables;
+  } catch (error) {
+    // UrlFetchApp pode lançar exceção antes de haver resposta HTTP quando uma
+    // autorização nova ainda não foi concedida. Isso jamais deve bloquear o login.
+    console.warn('Sheets batchGet indisponível: ' + String(error && error.message || error) + '. Usando SpreadsheetApp.');
+    return autOperationalSpreadsheetFallback_(names);
+  }
+}
+
+function autPrimeOperationalTables_(options) {
+  options = options || {};
+  if (!options.force && Object.keys(AUTENTIKO_REQUEST_TABLES_).length >= AUTENTIKO_OPERATIONAL_TABLE_NAMES_.length) {
+    return { marker:autOperationalExternalMarker_(), cacheHit:true, tables:Object.keys(AUTENTIKO_REQUEST_TABLES_) };
+  }
+  var marker = autOperationalExternalMarker_();
+  // O cache não gira a cada minuto. Ele só muda quando a revisão operacional
+  // muda ou quando uma sincronização forçada for solicitada.
+  var cacheIdentity = [AUTENTIKO_OPERATIONAL_BATCH_VERSION_, autOperationalRevision_()].join('|');
+  var cacheKey = 'AUT_OP_TABLES_' + AUTENTIKO_OPERATIONAL_BATCH_VERSION_.replace(/\W/g, '') + '_' + autHash_(cacheIdentity);
+  var cache = CacheService.getScriptCache();
+  var packed = !options.force ? autLargeCacheGet_(cache, cacheKey) : null;
+  var cacheHit = !!packed;
+  if (!packed) {
+    packed = autOperationalBatchGet_(AUTENTIKO_OPERATIONAL_TABLE_NAMES_);
+    autLargeCachePut_(cache, cacheKey, packed, 600);
+  }
+  AUTENTIKO_REQUEST_TABLES_ = {};
+  AUTENTIKO_OPERATIONAL_TABLE_NAMES_.forEach(function(name) {
+    var table = packed[name] || { headers:[], values:[] };
+    autSetRequestTable_(name, table.headers || [], table.values || []);
+  });
+  return { marker:marker, cacheHit:cacheHit, tables:Object.keys(AUTENTIKO_REQUEST_TABLES_) };
+}
+
 function autDb_() {
   if (!AUTENTIKO_DB_INSTANCE_) {
     AUTENTIKO_DB_INSTANCE_ = SpreadsheetApp.openById(AUTENTIKO.SPREADSHEET_ID);
@@ -51,6 +276,8 @@ function autSheet_(name) {
 }
 
 function autHeaders_(sheet) {
+  var requestTable = autRequestTable_(sheet && sheet.getName ? sheet.getName() : '');
+  if (requestTable && requestTable.headers && requestTable.headers.length) return requestTable.headers.slice();
   var cacheKey = 'AUT_HEADERS_' + sheet.getSheetId();
   var cached = CacheService.getScriptCache().get(cacheKey);
   if (cached) return autJsonParse_(cached, []);
@@ -61,6 +288,11 @@ function autHeaders_(sheet) {
 }
 
 function autRowAt_(name, rowNumber) {
+  var requestTable = autRequestTable_(name);
+  if (requestTable) {
+    var cachedRow = requestTable.rows.filter(function(item) { return Number(item._row) === Number(rowNumber); })[0];
+    return cachedRow ? Object.assign({}, cachedRow) : null;
+  }
   var sheet = autSheet_(name);
   if (!rowNumber || rowNumber < 2 || rowNumber > sheet.getLastRow()) return null;
   var headers = autHeaders_(sheet);
@@ -71,6 +303,8 @@ function autRowAt_(name, rowNumber) {
 }
 
 function autRows_(name) {
+  var requestTable = autRequestTable_(name);
+  if (requestTable) return requestTable.rows.map(function(row) { return Object.assign({}, row); });
   var sheet = autSheet_(name);
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
@@ -84,6 +318,12 @@ function autRows_(name) {
 }
 
 function autRowsBy_(name, key, value) {
+  var requestTable = autRequestTable_(name);
+  if (requestTable) {
+    var normalizedTarget = autNormalize_(value);
+    var index = autRequestTableIndex_(requestTable, key);
+    return (index[normalizedTarget] || []).map(function(row) { return Object.assign({}, row); });
+  }
   var sheet = autSheet_(name);
   var headers = autHeaders_(sheet);
   var column = headers.indexOf(key);
@@ -111,6 +351,13 @@ function autRowsBy_(name, key, value) {
 }
 
 function autFind_(name, key, value) {
+  var requestTable = autRequestTable_(name);
+  if (requestTable) {
+    var normalizedTarget = autNormalize_(value);
+    var index = autRequestTableIndex_(requestTable, key);
+    var cachedRow = (index[normalizedTarget] || [])[0];
+    return cachedRow ? Object.assign({}, cachedRow) : null;
+  }
   var sheet = autSheet_(name);
   var headers = autHeaders_(sheet);
   var column = headers.indexOf(key);
@@ -145,6 +392,8 @@ function autAppend_(name, obj) {
       autMasterInvalidateLookupCache_(obj.TIPO_PESSOA, obj.CPF_CNPJ);
     }
     sheet.getRange(rowNumber, 1, 1, headers.length).setValues([row]);
+    autRequestTableAppend_(name, rowNumber, obj);
+    autTouchOperationalRevision_(name);
     if (typeof autSearchIncremental_ === 'function') autSearchIncremental_(name, rowNumber);
     return rowNumber;
   });
@@ -162,6 +411,8 @@ function autAppendMany_(name, objects, options) {
     var startRow = sheet.getLastRow() + 1;
     sheet.getRange(startRow, 1, values.length, headers.length).setValues(values);
     var rowNumbers = values.map(function(unused, index) { return startRow + index; });
+    objects.forEach(function(obj, index) { autRequestTableAppend_(name, startRow + index, obj); });
+    autTouchOperationalRevision_(name);
     if (!options.skipSearch && typeof autSearchIncremental_ === 'function') {
       if (typeof autSearchIncrementalBatch_ === 'function') autSearchIncrementalBatch_(name, rowNumbers);
       else rowNumbers.forEach(function(rowNumber) { autSearchIncremental_(name, rowNumber); });
@@ -175,7 +426,8 @@ function autUpdateRow_(name, rowNumber, patch) {
     var sheet = autSheet_(name);
     var headers = autHeaders_(sheet);
     var range = sheet.getRange(rowNumber, 1, 1, headers.length);
-    var row = range.getValues()[0];
+    var requestRow = autRequestTable_(name) ? autRowAt_(name, rowNumber) : null;
+    var row = requestRow ? headers.map(function(header) { return requestRow[header]; }) : range.getValues()[0];
     if (name === 'BASE_CLIENTES' && typeof autMasterInvalidateLookupCache_ === 'function') {
       autMasterInvalidateLookupCache_(row[headers.indexOf('TIPO_PESSOA')], row[headers.indexOf('CPF_CNPJ')]);
       autMasterInvalidateLookupCache_(patch.TIPO_PESSOA || row[headers.indexOf('TIPO_PESSOA')], patch.CPF_CNPJ || row[headers.indexOf('CPF_CNPJ')]);
@@ -184,6 +436,8 @@ function autUpdateRow_(name, rowNumber, patch) {
       if (Object.prototype.hasOwnProperty.call(patch, header)) row[index] = autSafeCell_(patch[header]);
     });
     range.setValues([row]);
+    autRequestTablePatchRow_(name, rowNumber, patch);
+    autTouchOperationalRevision_(name);
     if (typeof autSearchIncremental_ === 'function') autSearchIncremental_(name, rowNumber);
   });
 }
@@ -222,6 +476,8 @@ function autPatchRows_(name, rowNumbers, patch, options) {
       });
       range.setValues(values);
     });
+    numbers.forEach(function(rowNumber) { autRequestTablePatchRow_(name, rowNumber, patch); });
+    autTouchOperationalRevision_(name);
     if (!options.skipSearch && typeof autSearchIncremental_ === 'function') {
       if (typeof autSearchIncrementalBatch_ === 'function') autSearchIncrementalBatch_(name, numbers);
       else numbers.forEach(function(rowNumber) { autSearchIncremental_(name, rowNumber); });
@@ -267,6 +523,8 @@ function autDeleteRowNumbers_(name, rowNumbers) {
     }
     groups.push({ start: start, count: end - start + 1 });
     groups.sort(function(a, b) { return b.start - a.start; }).forEach(function(group) { sheet.deleteRows(group.start, group.count); });
+    autRequestTableInvalidate_(name);
+    autTouchOperationalRevision_(name);
     if (typeof autSearchRemoveIncremental_ === 'function' && indexedRows.length) autSearchRemoveIncremental_(name, indexedRows);
   });
 }
@@ -299,6 +557,7 @@ function autInvalidateCaches_() {
   cache.removeAll(keys);
   AUTENTIKO_DB_INSTANCE_ = null;
   AUTENTIKO_SHEET_INSTANCES_ = {};
+  AUTENTIKO_REQUEST_TABLES_ = {};
 }
 
 function autPublicConfig_() {

@@ -10,6 +10,10 @@ function autCanSeeProcess_(user, process) {
 }
 
 function autRequireProcess_(user, processId) {
+  // Toda operação de processo reutiliza o snapshot bruto do servidor. Isso
+  // também acelera MediaService, documentos, workflow e integrações que
+  // chamam esta função fora do ciclo original do login.
+  if (!autRequestTable_('PROCESSOS')) autPrimeOperationalTables_({ force:false });
   var process = autFind_('PROCESSOS', 'ID_PROCESSO', processId);
   autAssert_(process && !process.EXCLUIDO_EM, 'Processo não encontrado.', 'NOT_FOUND');
   autAssert_(autCanSeeProcess_(user, process), 'Você não pode acessar este processo.', 'FORBIDDEN');
@@ -157,6 +161,7 @@ function autDashboard_(user, visibleRows) {
 function apiListarProcessos(token, filters) {
   try {
     var user = autRequireAuth_(token);
+    autPrimeOperationalTables_({ force:false });
     filters = filters || {};
     var search = autNormalize_(filters.search || '');
     var visibleRows = autVisibleProcesses_(user);
@@ -685,6 +690,7 @@ function autProcessTabCacheSeconds_(tab) {
 function apiAbrirProcesso(token, processId) {
   try {
     var user = autRequireAuth_(token);
+    autPrimeOperationalTables_({ force:false });
     var process = autRequireProcess_(user, processId);
     return autResult_({
       process: autProcessCard_(process),
@@ -701,6 +707,7 @@ function apiAbrirProcesso(token, processId) {
 function apiCarregarAbaProcesso(token, processId, tab) {
   try {
     var user = autRequireAuth_(token);
+    autPrimeOperationalTables_({ force:false });
     var process = autRequireProcess_(user, processId);
     var key = String(tab || '').toUpperCase();
     key = {

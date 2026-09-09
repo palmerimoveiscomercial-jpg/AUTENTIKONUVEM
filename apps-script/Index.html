@@ -189,6 +189,13 @@
         </div>
         <label>Tipo de processo<select id="new-process-type" name="type" required><option value="">Selecione...</option></select></label>
         <div id="process-draft-status" class="process-draft-status hidden" role="status" aria-live="polite"></div>
+        <section id="identity-ai-launcher" class="identity-ai-launcher hidden" aria-live="polite">
+          <div class="identity-ai-launcher-copy">
+            <span class="identity-ai-symbol">IA</span>
+            <div><p class="eyebrow">PREENCHIMENTO ASSISTIDO · OPCIONAL</p><h3>Ler os dois documentos de identidade</h3><p>Anexe RG, CIN ou CNH do proprietário/vendedor e do cliente/comprador/locatário. A IA prepara os dados em uma tela de revisão e só preenche a ficha depois da sua aprovação.</p></div>
+          </div>
+          <div class="identity-ai-launcher-actions"><div id="identity-ai-inline-status" class="identity-ai-inline-status"></div><button type="button" class="btn secondary" id="open-identity-ai">Ler documentos com IA</button></div>
+        </section>
         <div id="dynamic-process-form" class="dynamic-form"></div>
         <section id="income-acceptance-panel" class="income-acceptance-panel hidden" aria-live="polite">
           <div class="income-alert-light">!</div>
@@ -198,6 +205,40 @@
         </section>
         <div class="modal-actions"><button type="button" class="btn ghost" data-cancel-process-form>Cancelar e descartar</button><button type="submit" class="btn primary" id="process-submit-btn">Próxima etapa: documentos →</button></div>
       </form>
+    </div>
+
+    <div id="identity-ai-modal" class="modal xl hidden identity-ai-modal" role="dialog" aria-modal="true" aria-labelledby="identity-ai-title">
+      <div class="modal-head identity-ai-head"><div><p class="eyebrow">LEITURA ASSISTIDA · REVISÃO HUMANA OBRIGATÓRIA</p><h2 id="identity-ai-title">Documentos de identidade</h2><p>Nenhum campo da ficha é alterado até você clicar em <strong>Aprovar e preencher ficha</strong>.</p></div><button type="button" class="icon-btn" id="identity-ai-close" aria-label="Voltar para a ficha">×</button></div>
+      <div class="identity-ai-toolbar">
+        <div id="identity-ai-provider-status" class="identity-ai-provider-status"><span class="mini-spinner"></span> Verificando Gemini e OpenRouter…</div>
+        <button type="button" class="btn ghost compact" id="identity-ai-check-status">Verificar APIs</button>
+      </div>
+      <div class="identity-ai-grid">
+        <section class="identity-ai-side" data-ai-role="titular">
+          <header><span class="identity-ai-side-number">01</span><div><p class="eyebrow">LADO ESQUERDO</p><h3 id="identity-ai-title-titular">RG do proprietário / vendedor</h3><p id="identity-ai-help-titular">Documento do titular do imóvel.</p></div></header>
+          <label class="identity-ai-file-drop">
+            <input id="identity-ai-file-titular" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+            <span>Selecionar RG, CIN, CNH ou PDF</span><small>PDF: até 2 páginas serão consolidadas para leitura.</small>
+          </label>
+          <div id="identity-ai-preview-titular" class="identity-ai-preview empty">Nenhum documento selecionado.</div>
+          <div id="identity-ai-result-titular" class="identity-ai-result hidden"></div>
+        </section>
+        <section class="identity-ai-side" data-ai-role="cliente">
+          <header><span class="identity-ai-side-number">02</span><div><p class="eyebrow">LADO DIREITO</p><h3 id="identity-ai-title-cliente">RG do comprador / locatário</h3><p id="identity-ai-help-cliente">Documento da parte principal do processo.</p></div></header>
+          <label class="identity-ai-file-drop">
+            <input id="identity-ai-file-cliente" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+            <span>Selecionar RG, CIN, CNH ou PDF</span><small>PDF: até 2 páginas serão consolidadas para leitura.</small>
+          </label>
+          <div id="identity-ai-preview-cliente" class="identity-ai-preview empty">Nenhum documento selecionado.</div>
+          <div id="identity-ai-result-cliente" class="identity-ai-result hidden"></div>
+        </section>
+      </div>
+      <div id="identity-ai-message" class="identity-ai-message">Os arquivos ficam apenas na memória do navegador durante a revisão. Após a criação do processo, os originais aprovados entram na fila segura de documentos.</div>
+      <div class="modal-actions identity-ai-actions">
+        <button type="button" class="btn ghost" id="identity-ai-back">Voltar sem aplicar</button>
+        <button type="button" class="btn secondary" id="identity-ai-analyze">Analisar documentos</button>
+        <button type="button" class="btn primary" id="identity-ai-approve" disabled>Aprovar e preencher ficha</button>
+      </div>
     </div>
 
     <div id="detail-modal" class="modal xl hidden" role="dialog" aria-modal="true">

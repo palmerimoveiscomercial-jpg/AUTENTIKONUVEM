@@ -80,7 +80,8 @@ function autIntegrationCatalog_() {
       fields: [
         { key: 'baseUrl', label: 'URL base da Gemini API', type: 'url', required: true, property: 'AUT_INT_GEMINI_URL', defaultValue: 'https://generativelanguage.googleapis.com/v1beta', maxLength: 1000 },
         { key: 'apiKey', label: 'Gemini API Key', type: 'password', secret: true, required: true, property: 'AUT_INT_GEMINI_API_KEY', minLength: 20, maxLength: 1000 },
-        { key: 'model', label: 'Modelo', type: 'text', required: true, property: 'AUT_INT_GEMINI_MODEL', defaultValue: 'gemini-flash-latest', minLength: 3, maxLength: 160 }
+        { key: 'model', label: 'Modelo geral', type: 'text', required: true, property: 'AUT_INT_GEMINI_MODEL', defaultValue: 'gemini-flash-latest', minLength: 3, maxLength: 160 },
+        { key: 'visionModel', label: 'Modelo rápido para documentos/imagens', type: 'text', required: true, property: 'AUT_INT_GEMINI_VISION_MODEL', defaultValue: 'gemini-3.5-flash-lite', minLength: 3, maxLength: 160 }
       ]
     },
     {
@@ -90,7 +91,13 @@ function autIntegrationCatalog_() {
       fields: [
         { key: 'baseUrl', label: 'URL base da API', type: 'url', required: true, property: 'AUT_INT_OPENROUTER_URL', defaultValue: 'https://openrouter.ai/api/v1', maxLength: 1000 },
         { key: 'apiKey', label: 'OpenRouter API Key', type: 'password', secret: true, required: true, property: 'AUT_INT_OPENROUTER_API_KEY', minLength: 20, maxLength: 1000 },
-        { key: 'model', label: 'Modelo principal', type: 'text', required: true, property: 'AUT_INT_OPENROUTER_MODEL', defaultValue: 'openrouter/free', minLength: 3, maxLength: 200 },
+        { key: 'model', label: 'Modelo geral', type: 'text', required: true, property: 'AUT_INT_OPENROUTER_MODEL', defaultValue: 'openrouter/free', minLength: 3, maxLength: 200 },
+        { key: 'visionModel', label: 'Modelo preferido para documentos/imagens', type: 'text', required: true, property: 'AUT_INT_OPENROUTER_VISION_MODEL', defaultValue: 'openrouter/free', minLength: 3, maxLength: 200 },
+        { key: 'visionPolicy', label: 'Política de roteamento documental', type: 'select', required: true, property: 'AUT_INT_OPENROUTER_VISION_POLICY', defaultValue: 'ZDR_FREE_ONLY', options: [
+          { value: 'ZDR_FREE_ONLY', label: 'ZDR obrigatório · somente modelos gratuitos' },
+          { value: 'ZDR_ANY', label: 'ZDR obrigatório · permite modelo pago compatível' },
+          { value: 'ACCOUNT_POLICY', label: 'Usar política definida na conta OpenRouter' }
+        ] },
         { key: 'publicUrl', label: 'URL pública do AUTENTIKO', type: 'url', required: true, property: 'AUT_INT_OPENROUTER_PUBLIC_URL', defaultValue: 'https://autentikonuvem-zeta.vercel.app', maxLength: 1000 }
       ]
     },
@@ -353,12 +360,17 @@ function autIntegrationFetch_(url, options, label) {
   options.followRedirects = false;
   var response = UrlFetchApp.fetch(url, options);
   var status = Number(response.getResponseCode() || 0);
+  var text = String(response.getContentText() || '');
+  var json = autJsonParse_(text, null);
   if (status < 200 || status >= 300) {
-    var error = new Error((label || 'A integração') + ' respondeu com HTTP ' + status + '.');
+    var providerMessage = json && json.error && (json.error.message || json.error.code) || json && json.message || '';
+    var message = (label || 'A integração') + ' respondeu com HTTP ' + status + '.' + (providerMessage ? ' ' + String(providerMessage).slice(0, 220) : '');
+    var error = new Error(message);
     error.httpStatus = status;
+    error.responseExcerpt = text.slice(0, 600);
     throw error;
   }
-  return { response: response, status: status, json: autIntegrationResponseJson_(response) };
+  return { response: response, status: status, json: json };
 }
 
 function autIntegrationBase64Url_(value) {
@@ -444,16 +456,23 @@ function autIntegrationRunTest_(integration, values) {
     return { success: true, httpStatus: result.status, message: 'Chave DataJud aceita pelo índice ' + values.tribunal.toLowerCase() + '.' };
   }
   if (integration.id === 'GEMINI') {
-    result = autIntegrationFetch_(values.baseUrl + '/models/' + encodeURIComponent(values.model), {
-      method: 'get', headers: { 'X-Goog-Api-Key': values.apiKey }
-    }, 'Gemini');
-    return { success: true, httpStatus: result.status, message: 'Gemini autenticado e modelo ' + values.model + ' disponível.' };
+    var geminiResolved = autAiGeminiResolveVisionModel_(values, { verify: true, persist: true });
+    return {
+      success: true,
+      httpStatus: geminiResolved.httpStatus || 200,
+      message: 'Gemini autenticado; modelo documental ' + geminiResolved.model + ' disponível' + (geminiResolved.migrated ? ' (configuração migrada automaticamente).' : '.')
+    };
   }
   if (integration.id === 'OPENROUTER') {
     result = autIntegrationFetch_(values.baseUrl + '/key', {
       method: 'get', headers: { Authorization: 'Bearer ' + values.apiKey, 'HTTP-Referer': values.publicUrl }
     }, 'OpenRouter');
-    return { success: true, httpStatus: result.status, message: 'Chave OpenRouter autenticada; modelo configurado: ' + values.model + '.' };
+    var candidates = autAiOpenRouterDiscoverCandidates_(values);
+    return {
+      success: true,
+      httpStatus: result.status,
+      message: 'OpenRouter autenticado. Rota documental disponível (' + autAiOpenRouterPolicy_(values) + '): ' + candidates.slice(0, 3).join(', ') + '.'
+    };
   }
   if (integration.id === 'ADOBE') {
     result = autIntegrationFetch_(values.tokenUrl, {
@@ -539,4 +558,757 @@ function apiAdminAlternarIntegracao(token, integrationId, enabled, context) {
     return autResult_({ item: autIntegrationAdminItem_(integration) });
   } catch (err) { return autPublicError_(err); }
   finally { try { lock.releaseLock(); } catch (ignore) {} }
+}
+
+/* ================================================================
+ * LEITURA ASSISTIDA DE DOCUMENTOS DE IDENTIDADE · IA 2.9.4 ZDR RESILIENTE
+ *
+ * Princípios:
+ * - modelo de visão dedicado e rápido, separado do modelo geral;
+ * - Gemini com thinking mínimo/desligado quando suportado;
+ * - OpenRouter com Structured Output + roteamento por latência;
+ * - parser tolerante para JSON/tool-call e protocolo de linha de contingência;
+ * - cache curto por conteúdo para reanálise instantânea;
+ * - nenhum dado entra na ficha sem aprovação humana.
+ * ================================================================ */
+var AUT_AI_IDENTITY_CACHE_TTL_ = 900;
+var AUT_AI_PROVIDER_CIRCUIT_TTL_ = 45;
+
+function autAiProviderModel_(id) {
+  var integration = autIntegrationFind_(id);
+  var values = autIntegrationResolvedValues_(integration, {});
+  return String(values.visionModel || values.model || '').trim();
+}
+
+function autAiProviderCircuitKey_(id) {
+  return 'AUT_AI_PROVIDER_CIRCUIT_' + autNormalize_(id);
+}
+
+function autAiProviderFailure_(id, message) {
+  try {
+    CacheService.getScriptCache().put(autAiProviderCircuitKey_(id), String(message || 'Falha temporária').slice(0, 220), AUT_AI_PROVIDER_CIRCUIT_TTL_);
+  } catch (ignore) {}
+}
+
+function autAiProviderSuccess_(id) {
+  try { CacheService.getScriptCache().remove(autAiProviderCircuitKey_(id)); } catch (ignore) {}
+}
+
+function autAiProviderPublicStatus_(id) {
+  var integration = autIntegrationFind_(id);
+  var properties = PropertiesService.getScriptProperties();
+  var values = autIntegrationResolvedValues_(integration, {});
+  var required = integration.fields.filter(function(field) { return field.required; });
+  var configured = required.every(function(field) { return !!String(values[field.key] || '').trim(); });
+  var enabled = properties.getProperty(autIntegrationStateKey_(id, 'ENABLED')) === 'SIM';
+  var lastOk = properties.getProperty(autIntegrationStateKey_(id, 'LAST_TEST_OK')) === 'SIM';
+  var circuitMessage = '';
+  try { circuitMessage = CacheService.getScriptCache().get(autAiProviderCircuitKey_(id)) || ''; } catch (ignore) {}
+  return {
+    id:id,
+    name:integration.name,
+    enabled:enabled,
+    configured:configured,
+    healthy:enabled && configured && lastOk && !circuitMessage,
+    model:String(values.visionModel || values.model || ''),
+    circuitOpen:!!circuitMessage,
+    lastTestAt:properties.getProperty(autIntegrationStateKey_(id, 'LAST_TEST_AT')) || '',
+    message:circuitMessage || properties.getProperty(autIntegrationStateKey_(id, 'LAST_TEST_MESSAGE')) || (configured ? 'Aguardando teste da integração.' : 'Configuração incompleta.')
+  };
+}
+
+function autAiPublicStatus_() {
+  var providers = ['GEMINI', 'OPENROUTER'].map(autAiProviderPublicStatus_);
+  return {
+    available:providers.some(function(provider) { return provider.healthy; }),
+    providers:providers,
+    strategy:'FAST_RACE_V3',
+    approvalRequired:true
+  };
+}
+
+function apiStatusIADocumentos(token, liveTest) {
+  try {
+    var actor = autRequireAuth_(token);
+    autAssert_(autHasPermission_(actor, 'PROCESSO_CRIAR') || autHasPermission_(actor, 'PROCESSO_EDITAR'), 'Você não possui permissão para usar a leitura assistida.', 'FORBIDDEN');
+    if (liveTest === true) {
+      ['GEMINI','OPENROUTER'].forEach(function(id) {
+        try {
+          var status = autAiProviderPublicStatus_(id);
+          if (!status.enabled || !status.configured) return;
+          var integration = autIntegrationFind_(id);
+          var result = autIntegrationRunTest_(integration, autIntegrationResolvedValues_(integration, {}));
+          var properties = PropertiesService.getScriptProperties();
+          properties.setProperty(autIntegrationStateKey_(id, 'LAST_TEST_OK'), result.success ? 'SIM' : 'NAO');
+          properties.setProperty(autIntegrationStateKey_(id, 'LAST_TEST_AT'), autNow_());
+          properties.setProperty(autIntegrationStateKey_(id, 'LAST_TEST_MESSAGE'), String(result.message || '').slice(0, 300));
+          if (result.success) autAiProviderSuccess_(id);
+        } catch (error) {
+          var props = PropertiesService.getScriptProperties();
+          props.setProperty(autIntegrationStateKey_(id, 'LAST_TEST_OK'), 'NAO');
+          props.setProperty(autIntegrationStateKey_(id, 'LAST_TEST_AT'), autNow_());
+          props.setProperty(autIntegrationStateKey_(id, 'LAST_TEST_MESSAGE'), String(error.message || error).slice(0, 300));
+        }
+      });
+    }
+    return autResult_(autAiPublicStatus_());
+  } catch (err) { return autPublicError_(err); }
+}
+
+function autAiIdentityPrompt_(processType, roles) {
+  return [
+    'AUTENTIKO_IDENTITY_V3',
+    'TAREFA=extrair somente dados VISIVEIS de documento brasileiro (RG/CIN/CNH).',
+    'TIPO_PROCESSO=' + String(processType || 'NAO_INFORMADO'),
+    'PAPEIS=' + roles.join(','),
+    'REGRAS:',
+    '1. Cada imagem tem PAPEL explícito. Nunca misture titular e cliente.',
+    '2. Não invente, complete ou deduza dados. Campo incerto = string vazia.',
+    '3. CPF: exatamente 11 dígitos, somente se totalmente legível.',
+    '4. Datas: YYYY-MM-DD; data incompleta/incerta = vazia.',
+    '5. Preserve grafia dos nomes e acentos impressos.',
+    '6. document_type somente RG, CIN, CNH ou UNKNOWN.',
+    '7. confidence de 0 a 1; reduza se houver corte, reflexo ou baixa nitidez.',
+    '8. Responda exclusivamente no formato solicitado; sem explicações.'
+  ].join('\n');
+}
+
+function autAiIdentityJsonSchema_() {
+  var fields = {
+    nome:{type:'string'}, cpf:{type:'string'}, nascimento:{type:'string'}, documento:{type:'string'},
+    documento_expedicao:{type:'string'}, orgao_expedidor:{type:'string'}, estado_civil:{type:'string'},
+    nome_mae:{type:'string'}, nome_pai:{type:'string'}
+  };
+  function side() {
+    return {
+      type:'object', additionalProperties:false,
+      properties:{
+        document_type:{type:'string',enum:['RG','CIN','CNH','UNKNOWN']},
+        confidence:{type:'number',minimum:0,maximum:1},
+        fields:{type:'object',additionalProperties:false,properties:fields,required:Object.keys(fields)},
+        warnings:{type:'array',items:{type:'string'},maxItems:8}
+      },
+      required:['document_type','confidence','fields','warnings']
+    };
+  }
+  return {type:'object',additionalProperties:false,properties:{titular:side(),cliente:side()},required:['titular','cliente']};
+}
+
+function autAiIdentityGeminiSchema_() {
+  var lower = autAiIdentityJsonSchema_();
+  function convert(node) {
+    if (!node || typeof node !== 'object') return node;
+    if (Array.isArray(node)) return node.map(convert);
+    var out = {};
+    Object.keys(node).forEach(function(key) {
+      if (key === 'additionalProperties' || key === 'maxItems') return;
+      var value = node[key];
+      if (key === 'type' && typeof value === 'string') out[key] = value.toUpperCase();
+      else out[key] = convert(value);
+    });
+    return out;
+  }
+  return convert(lower);
+}
+
+function autAiNormalizeDate_(value) {
+  var text = String(value || '').trim();
+  if (!text) return '';
+  var iso = text.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  var br = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
+  var y, m, d;
+  if (iso) { y=Number(iso[1]); m=Number(iso[2]); d=Number(iso[3]); }
+  else if (br) { d=Number(br[1]); m=Number(br[2]); y=Number(br[3]); }
+  else return '';
+  var date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return '';
+  return String(y).padStart(4,'0') + '-' + String(m).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+}
+
+function autAiStripJsonText_(text) {
+  text = String(text || '').replace(/^\uFEFF/, '').trim();
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  var first = text.indexOf('{');
+  var last = text.lastIndexOf('}');
+  if (first >= 0 && last > first) text = text.slice(first, last + 1);
+  return text;
+}
+
+function autAiParseJsonLoose_(text) {
+  var stripped = autAiStripJsonText_(text);
+  if (!stripped) return null;
+  var parsed = autJsonParse_(stripped, null);
+  if (parsed && typeof parsed === 'object') return parsed;
+  var repaired = stripped
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/,\s*([}\]])/g, '$1');
+  parsed = autJsonParse_(repaired, null);
+  return parsed && typeof parsed === 'object' ? parsed : null;
+}
+
+function autAiIdentityEmptyRaw_() {
+  function side() {
+    return {document_type:'UNKNOWN',confidence:0,fields:{nome:'',cpf:'',nascimento:'',documento:'',documento_expedicao:'',orgao_expedidor:'',estado_civil:'',nome_mae:'',nome_pai:''},warnings:[]};
+  }
+  return {titular:side(),cliente:side()};
+}
+
+function autAiParseLineProtocol_(text) {
+  text = String(text || '');
+  if (text.indexOf('AUTENTIKO_LINE_V3') < 0 && !/(?:^|\n)[TC]_[A-Z_]+\s*=/.test(text)) return null;
+  var raw = autAiIdentityEmptyRaw_();
+  var fieldMap = {
+    NOME:'nome', CPF:'cpf', NASCIMENTO:'nascimento', DOCUMENTO:'documento', EXPEDICAO:'documento_expedicao',
+    ORGAO:'orgao_expedidor', ESTADO_CIVIL:'estado_civil', MAE:'nome_mae', PAI:'nome_pai'
+  };
+  text.split(/\r?\n/).forEach(function(line) {
+    var match = line.match(/^\s*([TC])_([A-Z_]+)\s*=\s*(.*?)\s*$/);
+    if (!match) return;
+    var side = match[1] === 'T' ? raw.titular : raw.cliente;
+    var key = match[2];
+    var value = match[3] || '';
+    if (key === 'TYPE') side.document_type = value;
+    else if (key === 'CONFIDENCE') side.confidence = Number(String(value).replace(',','.')) || 0;
+    else if (key === 'WARNING') { if (value) side.warnings.push(value); }
+    else if (fieldMap[key]) side.fields[fieldMap[key]] = value;
+  });
+  return raw;
+}
+
+function autAiNormalizeIdentitySide_(side) {
+  side = side && typeof side === 'object' ? side : {};
+  var source = side.fields && typeof side.fields === 'object' ? side.fields : side;
+  var allowed = ['nome','cpf','nascimento','documento','documento_expedicao','orgao_expedidor','estado_civil','nome_mae','nome_pai'];
+  var fields = {};
+  var warnings = Array.isArray(side.warnings) ? side.warnings.map(function(value) { return String(value).slice(0, 180); }).slice(0, 12) : [];
+  allowed.forEach(function(key) { fields[key] = String(source[key] == null ? '' : source[key]).trim(); });
+
+  var rawCpf = autDigits_(fields.cpf);
+  if (rawCpf) {
+    if (rawCpf.length === 11 && autCpfValido_(rawCpf)) fields.cpf = rawCpf;
+    else { fields.cpf = ''; warnings.push('CPF_INVALIDO_OU_INCOMPLETO'); }
+  }
+  ['nascimento','documento_expedicao'].forEach(function(key) {
+    if (!fields[key]) return;
+    var normalized = autAiNormalizeDate_(fields[key]);
+    if (!normalized) warnings.push((key === 'nascimento' ? 'DATA_NASCIMENTO' : 'DATA_EXPEDICAO') + '_INVALIDA_OU_INCOMPLETA');
+    fields[key] = normalized;
+  });
+
+  var documentType = autNormalize_(side.document_type || side.documentType || side.tipo_documento || 'UNKNOWN');
+  if (['RG','CIN','CNH'].indexOf(documentType) < 0) documentType = 'UNKNOWN';
+  var confidence = Math.max(0, Math.min(1, Number(side.confidence || 0)));
+  if (confidence < 0.55) warnings.push('BAIXA_CONFIANCA_REVISE_DOCUMENTO');
+
+  var fieldConfidence = {};
+  allowed.forEach(function(key) { fieldConfidence[key] = fields[key] ? confidence : 0; });
+  warnings = warnings.filter(function(value, index, list) { return value && list.indexOf(value) === index; }).slice(0, 16);
+  return {documentType:documentType,confidence:confidence,fields:fields,fieldConfidence:fieldConfidence,warnings:warnings};
+}
+
+function autAiNormalizeIdentityResult_(raw) {
+  raw = raw && typeof raw === 'object' ? raw : {};
+  var result = {
+    titular:autAiNormalizeIdentitySide_(raw.titular),
+    cliente:autAiNormalizeIdentitySide_(raw.cliente),
+    crossWarnings:[]
+  };
+  var t = result.titular.fields;
+  var c = result.cliente.fields;
+  if (t.cpf && c.cpf && t.cpf === c.cpf) result.crossWarnings.push('CPF_IGUAL_NOS_DOIS_PAPEIS_REVISE_OS_ARQUIVOS');
+  if (t.documento && c.documento && autNormalize_(t.documento) === autNormalize_(c.documento)) result.crossWarnings.push('NUMERO_DOCUMENTO_IGUAL_NOS_DOIS_PAPEIS');
+  if (result.crossWarnings.length) {
+    result.titular.warnings = result.titular.warnings.concat(result.crossWarnings).slice(0, 16);
+    result.cliente.warnings = result.cliente.warnings.concat(result.crossWarnings).slice(0, 16);
+  }
+  return result;
+}
+
+function autAiGeminiCanonicalModel_(model) {
+  return String(model || '').trim().replace(/^models\//i, '');
+}
+
+function autAiGeminiModelCandidates_(values) {
+  var configured = autAiGeminiCanonicalModel_(values && (values.visionModel || values.model) || '');
+  var candidates = [];
+  function add(model) {
+    model = autAiGeminiCanonicalModel_(model);
+    if (model && candidates.indexOf(model) < 0) candidates.push(model);
+  }
+
+  // As contas/projetos novos deixaram de receber acesso aos 2.5 Flash-Lite.
+  // Para essas configurações antigas, migramos diretamente para o modelo de
+  // baixa latência indicado para extração documental.
+  if (!configured || /^gemini-2\.5-(?:flash|flash-lite)/i.test(configured)) {
+    add('gemini-3.5-flash-lite');
+    add('gemini-3.1-flash-lite');
+    add('gemini-3.5-flash');
+    add('gemini-3.6-flash');
+    add(configured);
+  } else {
+    add(configured);
+    add('gemini-3.5-flash-lite');
+    add('gemini-3.1-flash-lite');
+    add('gemini-3.5-flash');
+    add('gemini-3.6-flash');
+  }
+  return candidates;
+}
+
+function autAiGeminiUnavailableModelError_(error) {
+  var message = String(error && error.message || error || '');
+  var status = Number(error && error.httpStatus || 0);
+  return status === 404 || /model.*(?:not found|no longer available|not available|unsupported)|models\/.*404/i.test(message);
+}
+
+function autAiGeminiPersistVisionModel_(model) {
+  model = autAiGeminiCanonicalModel_(model);
+  if (!model) return;
+  try {
+    PropertiesService.getScriptProperties().setProperty('AUT_INT_GEMINI_VISION_MODEL', model);
+  } catch (ignore) {}
+}
+
+function autAiGeminiResolveVisionModel_(values, options) {
+  values = values || {};
+  options = options || {};
+  var configured = autAiGeminiCanonicalModel_(values.visionModel || values.model);
+  var candidates = autAiGeminiModelCandidates_(values);
+  autAssert_(candidates.length, 'Nenhum modelo Gemini foi configurado para leitura documental.', 'AI_GEMINI_MODEL_REQUIRED');
+
+  // No caminho quente não fazemos uma chamada extra ao catálogo. A migração
+  // conhecida 2.5 -> 3.5 ocorre localmente e a validação real acontece na
+  // própria generateContent. O teste administrativo pode verificar o modelo.
+  if (!options.verify) {
+    var hot = candidates[0];
+    var migratedHot = !!configured && hot !== configured;
+    if (migratedHot && options.persist !== false) autAiGeminiPersistVisionModel_(hot);
+    return {model:hot,migrated:migratedHot,httpStatus:0};
+  }
+
+  var lastError = null;
+  for (var i = 0; i < candidates.length; i++) {
+    var model = candidates[i];
+    try {
+      var result = autIntegrationFetch_(String(values.baseUrl || '').replace(/\/+$/, '') + '/models/' + encodeURIComponent(model), {
+        method:'get', headers:{'X-Goog-Api-Key':values.apiKey}
+      }, 'Gemini');
+      var migrated = !!configured && model !== configured;
+      if (options.persist !== false && (migrated || !configured)) autAiGeminiPersistVisionModel_(model);
+      return {model:model,migrated:migrated,httpStatus:result.status};
+    } catch (error) {
+      lastError = error;
+      if (!autAiGeminiUnavailableModelError_(error)) throw error;
+    }
+  }
+  throw lastError || new Error('Nenhum modelo Gemini documental compatível está disponível para esta chave.');
+}
+
+function autAiGeminiThinkingConfig_(model) {
+  model = autAiGeminiCanonicalModel_(model).toLowerCase();
+  if (/^gemini-3/.test(model)) return {thinkingLevel:'minimal'};
+  if (/^gemini-2\.5-/.test(model)) return {thinkingBudget:0};
+  return null;
+}
+
+function autAiGeminiGenerationConfig_(model) {
+  var config = {
+    responseMimeType:'application/json',
+    responseSchema:autAiIdentityGeminiSchema_(),
+    maxOutputTokens:900
+  };
+  var thinking = autAiGeminiThinkingConfig_(model);
+  if (thinking) config.thinkingConfig = thinking;
+  // Gemini 3.x descontinuou temperature/topP/topK; não os enviamos. Isso reduz
+  // incompatibilidades e mantém a extração determinística via instruções + schema.
+  return config;
+}
+
+function autAiGeminiRequest_(values, model, documents, processType) {
+  var parts = [{text:autAiIdentityPrompt_(processType, documents.map(function(document) { return document.role; }))}];
+  documents.forEach(function(document, index) {
+    parts.push({text:'ARQUIVO_' + (index + 1) + '_PAPEL=' + String(document.role).toUpperCase()});
+    parts.push({inlineData:{mimeType:document.mimeType,data:document.base64}});
+  });
+  return autIntegrationFetch_(String(values.baseUrl || '').replace(/\/+$/, '') + '/models/' + encodeURIComponent(model) + ':generateContent', {
+    method:'post',contentType:'application/json',headers:{'X-Goog-Api-Key':values.apiKey},
+    payload:JSON.stringify({contents:[{role:'user',parts:parts}],generationConfig:autAiGeminiGenerationConfig_(model)})
+  }, 'Gemini');
+}
+
+function autAiGeminiParseResult_(result, model) {
+  var candidate = result.json && result.json.candidates && result.json.candidates[0];
+  var responseParts = candidate && candidate.content && candidate.content.parts || [];
+  var text = responseParts.map(function(part) { return part.text || ''; }).join('\n');
+  var parsed = autAiParseJsonLoose_(text);
+  autAssert_(parsed, 'O Gemini respondeu sem dados estruturados utilizáveis.', 'AI_INVALID_RESPONSE');
+  autAiProviderSuccess_('GEMINI');
+  return {provider:'GEMINI',model:model,httpStatus:result.status,analysis:autAiNormalizeIdentityResult_(parsed)};
+}
+
+function autAiGeminiIdentity_(documents, processType) {
+  var integration = autIntegrationFind_('GEMINI');
+  var values = autIntegrationResolvedValues_(integration, {});
+  var configured = autAiGeminiCanonicalModel_(values.visionModel || values.model);
+  var candidates = autAiGeminiModelCandidates_(values);
+  var maxAttempts = Math.min(2, candidates.length); // evita cascata lenta de modelos.
+  var lastError = null;
+
+  for (var i = 0; i < maxAttempts; i++) {
+    var model = candidates[i];
+    try {
+      var result = autAiGeminiRequest_(values, model, documents, processType);
+      var output = autAiGeminiParseResult_(result, model);
+      if (model !== configured) autAiGeminiPersistVisionModel_(model);
+      return output;
+    } catch (error) {
+      lastError = error;
+      var retryableModel = autAiGeminiUnavailableModelError_(error) || String(error && error.code || '') === 'AI_INVALID_RESPONSE';
+      if (!retryableModel || i + 1 >= maxAttempts) break;
+    }
+  }
+  throw lastError || new Error('O Gemini não conseguiu analisar o documento.');
+}
+
+function autAiOpenRouterMessagePayload_(json) {
+  var choice = json && json.choices && json.choices[0] || {};
+  var message = choice.message || {};
+  if (message.parsed && typeof message.parsed === 'object') return message.parsed;
+  var toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  for (var i = 0; i < toolCalls.length; i++) {
+    var args = toolCalls[i] && toolCalls[i].function && toolCalls[i].function.arguments;
+    if (args && typeof args === 'object') return args;
+    var parsedArgs = autAiParseJsonLoose_(args);
+    if (parsedArgs) return parsedArgs;
+  }
+  var content = message.content;
+  if (content && typeof content === 'object' && !Array.isArray(content)) return content;
+  if (Array.isArray(content)) {
+    content = content.map(function(item) {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') return item.text || item.content || item.output_text || '';
+      return '';
+    }).join('\n');
+  }
+  if (typeof content !== 'string') content = String(choice.text || '');
+  return autAiParseJsonLoose_(content) || autAiParseLineProtocol_(content);
+}
+
+function autAiOpenRouterLinePrompt_(processType, roles) {
+  return autAiIdentityPrompt_(processType, roles) + '\n' + [
+    'FORMATO_CONTINGENCIA=AUTENTIKO_LINE_V3',
+    'Se JSON estruturado não estiver disponível, retorne SOMENTE estas linhas, sem markdown:',
+    'AUTENTIKO_LINE_V3',
+    'T_TYPE=RG|CIN|CNH|UNKNOWN', 'T_CONFIDENCE=0.0', 'T_NOME=', 'T_CPF=', 'T_NASCIMENTO=', 'T_DOCUMENTO=', 'T_EXPEDICAO=', 'T_ORGAO=', 'T_ESTADO_CIVIL=', 'T_MAE=', 'T_PAI=',
+    'C_TYPE=RG|CIN|CNH|UNKNOWN', 'C_CONFIDENCE=0.0', 'C_NOME=', 'C_CPF=', 'C_NASCIMENTO=', 'C_DOCUMENTO=', 'C_EXPEDICAO=', 'C_ORGAO=', 'C_ESTADO_CIVIL=', 'C_MAE=', 'C_PAI=',
+    'END_AUTENTIKO'
+  ].join('\n');
+}
+
+function autAiOpenRouterContent_(documents, prompt) {
+  var content = [{type:'text',text:prompt}];
+  documents.forEach(function(document, index) {
+    content.push({type:'text',text:'ARQUIVO_' + (index + 1) + '_PAPEL=' + String(document.role).toUpperCase()});
+    content.push({type:'image_url',image_url:{url:'data:' + document.mimeType + ';base64,' + document.base64}});
+  });
+  return content;
+}
+
+function autAiOpenRouterModelIsFree_(model) {
+  model = model || {};
+  var id = String(model.id || '');
+  if (/:free$/i.test(id)) return true;
+  var pricing = model.pricing || {};
+  var prompt = Number(pricing.prompt || 0);
+  var completion = Number(pricing.completion || 0);
+  var request = Number(pricing.request || 0);
+  var image = Number(pricing.image || 0);
+  return prompt === 0 && completion === 0 && request === 0 && image === 0;
+}
+
+function autAiOpenRouterPolicy_(values) {
+  var policy = autNormalize_(values && values.visionPolicy || 'ZDR_FREE_ONLY');
+  if (['ZDR_FREE_ONLY','ZDR_ANY','ACCOUNT_POLICY'].indexOf(policy) < 0) policy = 'ZDR_FREE_ONLY';
+  return policy;
+}
+
+function autAiOpenRouterDiscoveryKey_(values) {
+  return 'AUT_AI_OR_MODELS_V4_' + autHash_([
+    autAiOpenRouterPolicy_(values),
+    String(values && values.visionModel || values && values.model || ''),
+    String(values && values.baseUrl || '')
+  ].join('|'));
+}
+
+function autAiOpenRouterDiscoverCandidates_(values) {
+  values = values || {};
+  var policy = autAiOpenRouterPolicy_(values);
+  var preferred = String(values.visionModel || values.model || '').trim();
+  autAssert_(preferred, 'Defina o modelo de visão do OpenRouter.', 'AI_OPENROUTER_MODEL_REQUIRED');
+
+  // ACCOUNT_POLICY preserva integralmente as regras da conta OpenRouter. Para um
+  // modelo explícito não fazemos troca silenciosa; para o roteador livre deixamos
+  // o próprio OpenRouter selecionar o modelo conforme os parâmetros enviados.
+  if (policy === 'ACCOUNT_POLICY') return [preferred];
+
+  var cache = CacheService.getScriptCache();
+  var cacheKey = autAiOpenRouterDiscoveryKey_(values);
+  var cached = autJsonParse_(cache.get(cacheKey), null);
+  if (cached && Array.isArray(cached.models) && cached.models.length) return cached.models.slice();
+
+  var url = String(values.baseUrl || '').replace(/\/+$/, '') +
+    '/models?input_modalities=image&supported_parameters=structured_outputs&zdr=true&sort=latency-low-to-high';
+  var result = autIntegrationFetch_(url, {
+    method:'get',
+    headers:{Authorization:'Bearer ' + values.apiKey,'HTTP-Referer':values.publicUrl,'X-Title':'AUTENTIKO OK NUVEM'},
+    muteHttpExceptions:true
+  }, 'OpenRouter · catálogo ZDR');
+  var models = result.json && Array.isArray(result.json.data) ? result.json.data : [];
+
+  // Caso o administrador tenha escolhido um modelo explícito, só o aceitamos se
+  // o catálogo atual confirmar imagem + structured output + pelo menos um endpoint ZDR.
+  if (preferred !== 'openrouter/free' && preferred !== 'openrouter/auto') {
+    var exact = models.filter(function(model) { return String(model.id || '') === preferred; });
+    if (policy === 'ZDR_FREE_ONLY') exact = exact.filter(autAiOpenRouterModelIsFree_);
+    autAssert_(exact.length,
+      policy === 'ZDR_FREE_ONLY'
+        ? 'O modelo OpenRouter configurado não possui rota gratuita compatível com imagem, JSON estruturado e ZDR. Use openrouter/free ou escolha outro modelo ZDR gratuito.'
+        : 'O modelo OpenRouter configurado não possui endpoint compatível com imagem, JSON estruturado e ZDR.',
+      'AI_OPENROUTER_MODEL_NOT_ZDR_COMPATIBLE');
+    return [preferred];
+  }
+
+  var compatible = models.filter(function(model) {
+    if (!model || !model.id) return false;
+    if (policy === 'ZDR_FREE_ONLY' && !autAiOpenRouterModelIsFree_(model)) return false;
+    return true;
+  });
+  var selected = compatible.slice(0, 3).map(function(model) { return String(model.id); });
+  autAssert_(selected.length,
+    policy === 'ZDR_FREE_ONLY'
+      ? 'Sua conta exige ZDR e, neste momento, o OpenRouter não oferece modelo gratuito elegível com visão + structured outputs. O AUTENTIKO manteve a proteção dos documentos e usará o Gemini quando disponível.'
+      : 'Nenhum modelo OpenRouter elegível com visão + structured outputs + ZDR está disponível neste momento.',
+    policy === 'ZDR_FREE_ONLY' ? 'AI_OPENROUTER_ZDR_NO_FREE_MODEL' : 'AI_OPENROUTER_ZDR_NO_MODEL');
+  try { autCachePut_(cache, cacheKey, {models:selected,at:autNow_()}, 300); } catch (ignore) {}
+  return selected;
+}
+
+function autAiOpenRouterGuardrailError_(error) {
+  var message = String(error && error.message || error || '');
+  return /ZDR|zero data retention|guardrail|data policy|data_collection|0 endpoints|no allowed providers|no endpoints/i.test(message);
+}
+
+function autAiOpenRouterFriendlyError_(error, model) {
+  var message = String(error && error.message || error || 'Falha desconhecida.');
+  if (autAiOpenRouterGuardrailError_(error)) {
+    var blocked = new Error(
+      'OpenRouter bloqueou o modelo ' + String(model || '') + ' pela política de privacidade/ZDR da conta ou do endpoint. ' +
+      'O AUTENTIKO não reduz essa proteção automaticamente. Configure um modelo de visão com endpoint ZDR compatível ou altere conscientemente a política no painel do OpenRouter.'
+    );
+    blocked.code = 'AI_OPENROUTER_ZDR_BLOCKED';
+    blocked.httpStatus = Number(error && error.httpStatus || 404);
+    return blocked;
+  }
+  var generic = new Error(message);
+  generic.code = error && error.code || 'AI_OPENROUTER_FAILED';
+  generic.httpStatus = Number(error && error.httpStatus || 0);
+  return generic;
+}
+
+function autAiOpenRouterRequest_(values, model, documents, processType) {
+  var roles = documents.map(function(document) { return document.role; });
+  var policy = autAiOpenRouterPolicy_(values);
+  var provider = {sort:'latency',allow_fallbacks:true,require_parameters:true};
+  if (policy !== 'ACCOUNT_POLICY') {
+    provider.data_collection = 'deny';
+    provider.zdr = true;
+  }
+  var payload = {
+    model:model,
+    temperature:0,
+    top_p:0.05,
+    max_tokens:900,
+    stream:false,
+    provider:provider,
+    response_format:{type:'json_schema',json_schema:{name:'autentiko_identity_v4',strict:true,schema:autAiIdentityJsonSchema_()}},
+    plugins:[{id:'response-healing'}],
+    messages:[
+      {role:'system',content:'Extração documental determinística do AUTENTIKO. Não invente dados. Retorne somente o objeto definido pelo JSON Schema.'},
+      {role:'user',content:autAiOpenRouterContent_(documents, autAiIdentityPrompt_(processType, roles))}
+    ]
+  };
+  return autIntegrationFetch_(values.baseUrl + '/chat/completions', {
+    method:'post',contentType:'application/json',
+    headers:{
+      Authorization:'Bearer ' + values.apiKey,
+      'HTTP-Referer':values.publicUrl,
+      'X-Title':'AUTENTIKO OK NUVEM',
+      'X-OpenRouter-Metadata':'enabled'
+    },
+    payload:JSON.stringify(payload)
+  }, 'OpenRouter');
+}
+
+function autAiOpenRouterIdentity_(documents, processType) {
+  var integration = autIntegrationFind_('OPENROUTER');
+  var values = autIntegrationResolvedValues_(integration, {});
+  var candidates = autAiOpenRouterDiscoverCandidates_(values);
+  var started = Date.now();
+  var failures = [];
+
+  for (var index = 0; index < candidates.length; index++) {
+    var model = candidates[index];
+    try {
+      var result = autAiOpenRouterRequest_(values, model, documents, processType);
+      var structured = autAiOpenRouterMessagePayload_(result.json);
+      if (!structured) {
+        var invalid = new Error('O modelo respondeu, mas não devolveu o objeto documental exigido pelo schema.');
+        invalid.code = 'AI_INVALID_RESPONSE';
+        throw invalid;
+      }
+      autAiProviderSuccess_('OPENROUTER');
+      return {
+        provider:'OPENROUTER',
+        model:(result.json && result.json.model) || model,
+        httpStatus:result.status,
+        analysis:autAiNormalizeIdentityResult_(structured)
+      };
+    } catch (rawError) {
+      var error = autAiOpenRouterFriendlyError_(rawError, model);
+      failures.push({model:model,code:error.code || '',message:String(error.message || error).slice(0,240)});
+      // Evita transformar uma leitura simples em uma espera longa. Só tenta outro
+      // candidato quando a falha ocorreu cedo e ainda estamos dentro da janela rápida.
+      if (Date.now() - started > 18000) break;
+    }
+  }
+
+  var summary = failures.map(function(item) {
+    return item.model + ': ' + item.message;
+  }).join(' | ');
+  var finalError = new Error(summary || 'O OpenRouter não encontrou uma rota documental compatível.');
+  finalError.code = failures.some(function(item) { return item.code === 'AI_OPENROUTER_ZDR_BLOCKED'; })
+    ? 'AI_OPENROUTER_ZDR_BLOCKED'
+    : 'AI_OPENROUTER_FAILED';
+  throw finalError;
+}
+
+function autAiValidatedIdentityRequest_(payload) {
+  payload = payload || {};
+  var processType = String(payload.processType || '').trim();
+  autAssert_(!processType || AUTENTIKO.PROCESS_TYPES.indexOf(processType) >= 0, 'Tipo de processo inválido.', 'INVALID_PROCESS_TYPE');
+  var documents = (Array.isArray(payload.documents) ? payload.documents : []).map(function(document) {
+    var role = String(document.role || '').toLowerCase();
+    var mimeType = String(document.mimeType || '').toLowerCase();
+    var base64 = String(document.base64 || '').replace(/^data:[^;]+;base64,/, '');
+    autAssert_(role === 'titular' || role === 'cliente', 'Papel do documento inválido.', 'INVALID_DOCUMENT_ROLE');
+    autAssert_(['image/jpeg','image/png','image/webp'].indexOf(mimeType) >= 0, 'Converta o documento para imagem JPEG, PNG ou WEBP.', 'INVALID_FILE_TYPE');
+    autAssert_(base64.length > 200 && base64.length <= 2600000, 'O documento ultrapassa o tamanho otimizado para leitura rápida por IA.', 'FILE_TOO_LARGE');
+    return {role:role,mimeType:mimeType,base64:base64};
+  });
+  autAssert_(documents.length >= 1 && documents.length <= 2, 'Envie um ou dois documentos de identidade.', 'DOCUMENT_REQUIRED');
+  autAssert_(documents.map(function(item) { return item.base64.length; }).reduce(function(total, value) { return total + value; }, 0) <= 4800000,
+    'Os documentos juntos ultrapassam o tamanho otimizado para análise rápida.', 'FILE_TOO_LARGE');
+  return {processType:processType,documents:documents};
+}
+
+function autAiIdentityFingerprint_(request) {
+  var parts = [String(request.processType || '')];
+  (request.documents || []).forEach(function(document) {
+    parts.push(document.role + ':' + document.mimeType + ':' + autHash_(document.base64));
+  });
+  return autHash_(parts.join('|'));
+}
+
+function autAiIdentityCacheGet_(request) {
+  try {
+    var value = CacheService.getScriptCache().get('AUT_AI_ID_V3_' + autAiIdentityFingerprint_(request));
+    return autJsonParse_(value, null);
+  } catch (ignore) { return null; }
+}
+
+function autAiIdentityCachePut_(request, output) {
+  try {
+    autCachePut_(CacheService.getScriptCache(), 'AUT_AI_ID_V3_' + autAiIdentityFingerprint_(request), {
+      provider:output.provider,model:output.model,analysis:output.analysis,cachedAt:autNow_()
+    }, AUT_AI_IDENTITY_CACHE_TTL_);
+  } catch (ignore) {}
+}
+
+function autAiRunIdentityProvider_(providerId, documents, processType) {
+  providerId = autNormalize_(providerId);
+  autAssert_(['GEMINI','OPENROUTER'].indexOf(providerId) >= 0, 'Provedor de IA inválido.', 'AI_PROVIDER_UNAVAILABLE');
+  try {
+    return providerId === 'GEMINI' ? autAiGeminiIdentity_(documents, processType) : autAiOpenRouterIdentity_(documents, processType);
+  } catch (error) {
+    autAiProviderFailure_(providerId, String(error && error.message || error));
+    throw error;
+  }
+}
+
+function autAiAuditIdentityOnce_(actor, processType, output, documents, context, latencyMs) {
+  var correlation = String(context && (context.aiRequestId || context.requestId) || '').trim();
+  if (!correlation) correlation = autUuid_();
+  var key = 'AUT_AI_ACCEPTED_' + autHash_(String(actor.ID_USUARIO) + '|' + correlation);
+  return autWithScriptLock_(function() {
+    var cache = CacheService.getScriptCache();
+    if (cache.get(key)) return false;
+    cache.put(key, '1', 300);
+    autAudit_(actor, 'IA_DOCUMENTO_IDENTIDADE_ANALISADO', 'PROCESSO_RASCUNHO', processType || 'SEM_TIPO', {
+      provider:output.provider,model:output.model,documentos:documents.map(function(document) { return document.role; }),
+      latenciaMs:Number(latencyMs || 0),persistido:false,revisaoHumanaObrigatoria:true,correlacao:correlation
+    }, context || {});
+    return true;
+  });
+}
+
+function apiAnalisarDocumentosIdentidadeProvedor(token, payload, providerId, context) {
+  var started = Date.now();
+  try {
+    var actor = autRequireAuth_(token);
+    autAssert_(autHasPermission_(actor, 'PROCESSO_CRIAR') || autHasPermission_(actor, 'PROCESSO_EDITAR'), 'Você não possui permissão para usar a leitura assistida.', 'FORBIDDEN');
+    var request = autAiValidatedIdentityRequest_(payload);
+    var cached = autAiIdentityCacheGet_(request);
+    if (cached && cached.analysis) {
+      return autResult_({success:true,provider:cached.provider,model:cached.model,analysis:cached.analysis,latencyMs:Date.now()-started,cached:true,approvalRequired:true,message:'Leitura recuperada do cache seguro.'});
+    }
+    providerId = autNormalize_(providerId);
+    autAssert_(['GEMINI','OPENROUTER'].indexOf(providerId) >= 0, 'Provedor de IA inválido.', 'AI_PROVIDER_UNAVAILABLE');
+    var status = autAiProviderPublicStatus_(providerId);
+    if (!status.healthy) return autResult_({success:false,provider:providerId,latencyMs:Date.now()-started,message:status.message || 'Este provedor de IA não está disponível agora.'});
+    var output;
+    try { output = autAiRunIdentityProvider_(providerId, request.documents, request.processType); }
+    catch (providerError) {
+      return autResult_({success:false,provider:providerId,latencyMs:Date.now()-started,code:providerError && providerError.code || 'AI_PROVIDER_FAILED',message:String(providerError && providerError.message || providerError || 'A IA não conseguiu analisar o documento.').slice(0,360)});
+    }
+    autAiIdentityCachePut_(request, output);
+    var latency = Date.now() - started;
+    autAiAuditIdentityOnce_(actor, request.processType, output, request.documents, context, latency);
+    return autResult_({success:true,provider:output.provider,model:output.model,analysis:output.analysis,latencyMs:latency,cached:false,approvalRequired:true,message:'Leitura concluída. Revise os campos antes de aprovar o preenchimento.'});
+  } catch (err) { return autPublicError_(err); }
+}
+
+function apiAnalisarDocumentosIdentidade(token, payload, context) {
+  var started = Date.now();
+  try {
+    var actor = autRequireAuth_(token);
+    autAssert_(autHasPermission_(actor, 'PROCESSO_CRIAR') || autHasPermission_(actor, 'PROCESSO_EDITAR'), 'Você não possui permissão para usar a leitura assistida.', 'FORBIDDEN');
+    var request = autAiValidatedIdentityRequest_(payload);
+    var cached = autAiIdentityCacheGet_(request);
+    if (cached && cached.analysis) return autResult_({success:true,provider:cached.provider,model:cached.model,analysis:cached.analysis,latencyMs:Date.now()-started,cached:true,approvalRequired:true});
+    var statuses = autAiPublicStatus_();
+    var preferred = statuses.providers.filter(function(provider) { return provider.healthy; }).sort(function(a,b) {
+      if (a.id === 'OPENROUTER') return -1;
+      if (b.id === 'OPENROUTER') return 1;
+      return 0;
+    })[0];
+    if (!preferred) return autResult_({success:false,available:false,providers:statuses.providers,latencyMs:Date.now()-started,message:'Nenhuma IA de documentos está ativa e testada. O cadastro manual continua disponível.'});
+    var output;
+    try { output = autAiRunIdentityProvider_(preferred.id, request.documents, request.processType); }
+    catch (providerError) { return autResult_({success:false,available:true,provider:preferred.id,providers:statuses.providers,latencyMs:Date.now()-started,message:String(providerError && providerError.message || providerError).slice(0,360)}); }
+    autAiIdentityCachePut_(request, output);
+    var latency = Date.now() - started;
+    autAiAuditIdentityOnce_(actor, request.processType, output, request.documents, context, latency);
+    return autResult_({success:true,provider:output.provider,model:output.model,analysis:output.analysis,providers:statuses.providers,latencyMs:latency,cached:false,approvalRequired:true,message:'Leitura concluída. Revise os campos antes de aprovar o preenchimento.'});
+  } catch (err) { return autPublicError_(err); }
 }

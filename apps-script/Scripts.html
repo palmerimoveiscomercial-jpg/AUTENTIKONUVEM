@@ -1,12 +1,18 @@
 <script>
 (() => {
   'use strict';
+  // HOTFIX 2.9.5: trava funcional do tipo de processo durante criação/edição.
 
   const state = {
     token: localStorage.getItem('autentiko_token') || '',
+    sessionExpiresAt: localStorage.getItem('autentiko_session_expires_at') || '',
+    sessionConfirmedAt: Number(localStorage.getItem('autentiko_session_confirmed_at') || 0),
+    authRecoveryPromise: null,
     bootstrap: null,
     public: null,
     processes: [],
+    allProcesses: [],
+    documentMetadataById: new Map(),
     currentProcess: null,
     contracts: [],
     contractQueue: 'TODOS',
@@ -47,6 +53,9 @@
     processViewToken: 0,
     processSyncPromise: null,
     processListRefreshTimer: 0,
+    snapshotSyncTimer: 0,
+    snapshotSyncPromise: null,
+    snapshotSyncLastAt: 0,
     visualObjectUrls: new Map(),
     visualLoadToken: 0,
     visualObserver: null,
@@ -74,6 +83,10 @@
     processFormMode: 'create',
     processEditId: '',
     processEditExpectedVersion: 0,
+    // O tipo da ficha é estado funcional, não apenas valor visual do <select>.
+    // Isso impede que uma sincronização/re-render apague o tipo em uso.
+    processSelectedType: '',
+    processFormLoadNonce: 0,
     database: {
       tab: 'clients',
       clients: [],
@@ -100,6 +113,9 @@
     databaseLookupCache: new Map(),
     databaseLookupPending: new Map(),
     propertyLookupTimer: 0,
+    identityAi: {
+      analysis:null, providerStatus:null, files:{titular:null,cliente:null}, prepared:{}, pendingDocuments:[], returnModal:'process-modal', analyzing:false
+    },
     context: {
       device: {
         userAgent: navigator.userAgent,
@@ -144,7 +160,13 @@
   const hasPermission = permission => state.bootstrap?.user?.permissions?.includes('*') || state.bootstrap?.user?.permissions?.includes(permission);
   const API_TIMEOUTS = {
     apiPublicBootstrap: 20000,
-    apiBootstrap: 30000,
+    apiLogin: 120000,
+    apiValidarSessao: 15000,
+    apiBootstrap: 90000,
+    apiSincronizarSnapshot: 120000,
+    apiStatusIADocumentos: 30000,
+    apiAnalisarDocumentosIdentidade: 45000,
+    apiAnalisarDocumentosIdentidadeProvedor: 42000,
     apiAquecerCacheAutopreenchimento: 90000,
     apiCriarProcesso: 180000,
     apiAtualizarProcesso: 180000,
@@ -175,7 +197,7 @@
     apiAdminAlternarIntegracao: 45000
   };
   const BROWSER_CACHE = Object.freeze({
-    schemaVersion: '2.5.5',
+    schemaVersion: '2.9.3',
     database: 'AUTENTIKO_BROWSER_CACHE',
     store: 'entries',
     maxBytes: 96 * 1024 * 1024,
@@ -486,21 +508,70 @@
       const timer = setTimeout(() => finish(reject)(new Error(
         name === 'apiPublicBootstrap' || name === 'apiBootstrap'
           ? 'O servidor demorou para responder. Atualize a página e tente novamente.'
-          : 'A operação demorou mais que o esperado. Tente novamente.'
+          : name === 'apiAnalisarDocumentosIdentidadeProvedor' || name === 'apiAnalisarDocumentosIdentidade'
+            ? 'A IA ultrapassou o limite rápido de 42 segundos. Tente outra imagem ou use o preenchimento manual.'
+            : 'A operação demorou mais que o esperado. Tente novamente.'
       )), timeoutMs);
       try {
         const runner = google.script.run
           .withSuccessHandler(finish(resolve))
-          .withFailureHandler(error => finish(reject)(new Error(error?.message || String(error))));
+          .withFailureHandler(error => {
+            const raw = error?.message || error?.details || String(error || '');
+            let message = raw || 'Falha de comunicação com o Apps Script.';
+            if (/UrlFetchApp\.fetch|script\.external_request/i.test(message)) message = 'Permissão de acesso externo pendente no Apps Script. Execute a função de autorização e aceite as permissões.';
+            else if (/Date.*legal parameter|not a legal parameter|cannot return.*Date/i.test(message)) message = 'O servidor tentou devolver um tipo de dado incompatível. Atualize para a versão corrigida do AUTENTIKO.';
+            finish(reject)(new Error(message));
+          });
         runner[name].apply(runner, args);
       } catch (error) { finish(reject)(error); }
     });
   }
 
+  const AUTH_FAILURE_CODES = new Set(['AUTH_REQUIRED','SESSION_EXPIRED','USER_INACTIVE']);
+
+  function apiArgumentSignature(arg) {
+    if (arg instanceof HTMLFormElement) return `FORM:${arg.dataset.apiKey || arg.id || 'upload'}`;
+    if (arg && typeof arg === 'object' && Array.isArray(arg.documents)) {
+      const documents = arg.documents.map(document => `${document.role || ''}:${document.mimeType || ''}:${String(document.base64 || '').length}`).join(',');
+      return `AI_DOCS:${arg.processType || ''}:${documents}`;
+    }
+    try {
+      const text = JSON.stringify(arg);
+      return text && text.length > 12000 ? `${text.slice(0,2000)}|LEN:${text.length}` : text;
+    } catch (error) { return String(arg); }
+  }
+
+  function persistSessionConfirmation(data = {}) {
+    if (data.expiresAt) {
+      state.sessionExpiresAt = String(data.expiresAt);
+      try { localStorage.setItem('autentiko_session_expires_at', state.sessionExpiresAt); } catch (ignoreStorageRestriction) {}
+    }
+    state.sessionConfirmedAt = Date.now();
+    try { localStorage.setItem('autentiko_session_confirmed_at', String(state.sessionConfirmedAt)); } catch (ignoreStorageRestriction) {}
+  }
+
+  async function confirmSessionDurably() {
+    const tokenAtStart = String(state.token || '');
+    if (!tokenAtStart) return {valid:false, code:'AUTH_REQUIRED', reason:'TOKEN_AUSENTE'};
+    if (state.authRecoveryPromise) return state.authRecoveryPromise;
+    const operation = (async () => {
+      try {
+        const response = await gas('apiValidarSessao', tokenAtStart);
+        if (!response?.ok) return {valid:null, code:response?.code || 'VALIDATION_UNAVAILABLE', message:response?.message || 'Não foi possível confirmar a sessão.'};
+        const data = response.data || {};
+        if (data.valid && state.token === tokenAtStart) persistSessionConfirmation(data);
+        return data;
+      } catch (error) {
+        return {valid:null, code:'VALIDATION_UNAVAILABLE', message:error?.message || 'Não foi possível confirmar a sessão agora.'};
+      }
+    })();
+    state.authRecoveryPromise = operation;
+    try { return await operation; }
+    finally { if (state.authRecoveryPromise === operation) state.authRecoveryPromise = null; }
+  }
+
   async function api(name, ...args) {
-    const argumentKey = args.map(arg => arg instanceof HTMLFormElement
-      ? `FORM:${arg.dataset.apiKey || arg.id || 'upload'}`
-      : JSON.stringify(arg)).join('|');
+    const argumentKey = args.map(apiArgumentSignature).join('|');
     const originalKey = `${name}|${argumentKey}`;
     if (apiInFlight.has(originalKey)) return apiInFlight.get(originalKey);
     if (args.at(-1) === state.context) {
@@ -511,14 +582,35 @@
       };
     }
     const operation = (async () => {
-      const response = await gas(name, ...args);
-      if (!response?.ok) {
-        const error = new Error(response?.message || 'Não foi possível concluir a operação.');
-        error.code = response?.code;
-        if (['AUTH_REQUIRED','SESSION_EXPIRED','USER_INACTIVE'].includes(error.code)) endSession(false);
-        throw error;
+      let response = await gas(name, ...args);
+      if (response?.ok) return response.data;
+
+      const firstCode = response?.code || '';
+      if (AUTH_FAILURE_CODES.has(firstCode) && name !== 'apiValidarSessao' && state.token) {
+        // Nunca derrube o usuário por causa de uma única resposta de uma chamada em
+        // segundo plano. Primeiro confira a sessão diretamente na aba SESSOES.
+        const confirmation = await confirmSessionDurably();
+        if (confirmation?.valid === true) {
+          response = await gas(name, ...args); // a primeira chamada foi barrada na autenticação; é seguro repetir uma vez.
+          if (response?.ok) return response.data;
+          const retryError = new Error(response?.message || 'A sessão foi confirmada, mas esta operação não conseguiu autenticar. Tente novamente.');
+          retryError.code = response?.code || firstCode;
+          throw retryError;
+        }
+        if (confirmation?.valid === false) {
+          endSession(false);
+          const invalid = new Error(firstCode === 'SESSION_EXPIRED' ? 'Sua sessão expirou. Entre novamente.' : 'A sessão não está mais válida. Entre novamente.');
+          invalid.code = confirmation.code || firstCode;
+          throw invalid;
+        }
+        const uncertain = new Error('A operação perdeu a confirmação de sessão, mas seu login foi preservado porque o servidor não conseguiu validar a sessão com segurança. Tente novamente.');
+        uncertain.code = firstCode;
+        throw uncertain;
       }
-      return response.data;
+
+      const error = new Error(response?.message || 'Não foi possível concluir a operação.');
+      error.code = firstCode;
+      throw error;
     })();
     apiInFlight.set(originalKey, operation);
     try {
@@ -592,7 +684,7 @@
   function readShortProcessDraft(type = '', processId = state.processEditId) {
     try {
       const editing = state.processFormMode === 'edit' && Boolean(processId);
-      const selectedType = type || (editing ? state.currentProcess?.process?.type : sessionStorage.getItem(shortProcessDraftPointerKey())) || '';
+      const selectedType = type || currentProcessFormType() || (editing ? state.currentProcess?.process?.type : sessionStorage.getItem(shortProcessDraftPointerKey())) || '';
       if (!selectedType) return null;
       const key = shortProcessDraftKey(selectedType, processId);
       const draft = JSON.parse(sessionStorage.getItem(key) || 'null');
@@ -606,7 +698,7 @@
   }
 
   function saveShortProcessDraft() {
-    const type = $('#new-process-type')?.value || '';
+    const type = currentProcessFormType();
     if (!type || activeModalId() !== 'process-modal') return null;
     const draft = {
       owner: shortProcessDraftOwner(),
@@ -639,7 +731,7 @@
 
   function clearShortProcessDraft(type = '', processId = state.processEditId) {
     const editing = state.processFormMode === 'edit' && Boolean(processId);
-    const selectedType = type || $('#new-process-type')?.value || (editing ? state.currentProcess?.process?.type : sessionStorage.getItem(shortProcessDraftPointerKey())) || '';
+    const selectedType = type || currentProcessFormType() || (editing ? state.currentProcess?.process?.type : sessionStorage.getItem(shortProcessDraftPointerKey())) || '';
     try {
       if (selectedType) sessionStorage.removeItem(shortProcessDraftKey(selectedType, processId));
       if (!editing) sessionStorage.removeItem(shortProcessDraftPointerKey());
@@ -663,10 +755,10 @@
 
   function cancelProcessForm() {
     const editing = state.processFormMode === 'edit' && Boolean(state.processEditId);
-    const hasDraft = state.processDraftDirty || Boolean(readShortProcessDraft($('#new-process-type')?.value || '', state.processEditId));
+    const hasDraft = state.processDraftDirty || Boolean(readShortProcessDraft(currentProcessFormType(), state.processEditId));
     if (hasDraft && !confirm('Cancelar e descartar definitivamente os dados ainda não enviados? Esta ação não poderá ser desfeita.')) return false;
     const processId = state.processEditId;
-    const type = $('#new-process-type')?.value || state.currentProcess?.process?.type || '';
+    const type = currentProcessFormType() || state.currentProcess?.process?.type || '';
     clearTimeout(state.processDraftTimer);
     state.processDraftTimer = 0;
     if (editing) clearShortProcessDraft(type, processId);
@@ -679,10 +771,13 @@
     clearTimeout(state.propertyLookupTimer);
     state.databaseLookupNonce += 1;
     state.databaseMatch = null;
+    clearIdentityAiPrepared(false);
     state.processFormMode = 'create';
     state.processEditId = '';
     state.processEditExpectedVersion = 0;
-    if ($('#new-process-type')) $('#new-process-type').disabled = false;
+    state.processSelectedType = '';
+    state.processFormLoadNonce += 1;
+    if ($('#new-process-type')) { $('#new-process-type').disabled = false; $('#new-process-type').value = ''; }
     if (editing && state.currentProcess) {
       openModal('detail-modal');
       return true;
@@ -742,7 +837,12 @@
       requestAuditIp();
       if (state.token) {
         try { await loadApp(); }
-        catch (error) { endSession(false); showPublic(); }
+        catch (error) {
+          // Uma falha temporária ao montar o snapshot não invalida a credencial.
+          // Mantemos o token para permitir nova tentativa sem forçar outro login.
+          showPublic();
+          authMessage('Sua sessão continua válida, mas os dados do sistema não carregaram: ' + (error?.message || 'falha temporária') + '. Atualize a página para tentar novamente.');
+        }
       } else {
         showPublic();
         hidePageLoader();
@@ -770,9 +870,105 @@
     $('#public-shell').classList.remove('hidden');
   }
 
-  async function loadApp() {
-    state.bootstrap = await api('apiBootstrap', state.token);
-    configureBrowserCacheForUser(state.bootstrap.user);
+  function hydrateOperationalSnapshot(bootstrap, options = {}) {
+    if (!bootstrap) return;
+    state.bootstrap = bootstrap;
+    state.allProcesses = Array.isArray(bootstrap.processes) ? bootstrap.processes.slice() : state.allProcesses;
+    state.documentMetadataById.clear();
+    (bootstrap.thumbnailDocuments || []).forEach(document => {
+      if (document?.id) state.documentMetadataById.set(String(document.id), document);
+    });
+    Object.entries(bootstrap.details || {}).forEach(([processId, detail]) => {
+      if (detail?.shell) setProcessShellCache(processId, detail.shell, false);
+      const tabs = detail?.tabs || {};
+      if (tabs.registration) setProcessTabCache(processId, 'registration', tabs.registration, false);
+      if (tabs.documents) {
+        setProcessTabCache(processId, 'documents', tabs.documents, false);
+        (tabs.documents.documents || []).forEach(document => {
+          if (document?.id) state.documentMetadataById.set(String(document.id), {...document, processId});
+        });
+      }
+      if (tabs.review) setProcessTabCache(processId, 'review', tabs.review, false);
+    });
+    if (bootstrap.snapshot?.marker) {
+      try { sessionStorage.setItem(`autentiko:${BROWSER_CACHE.schemaVersion}:${state.browserCacheNamespace}:snapshot-marker`, bootstrap.snapshot.marker); }
+      catch (ignoreStorageRestriction) {}
+    }
+    if (options.render !== false) {
+      const active = $('.nav-btn.active')?.dataset.view || 'dashboard';
+      if (active === 'dashboard' || active === 'processes') void loadProcesses(active === 'processes' ? 'processes' : 'dashboard', {localOnly:true, silent:true});
+    }
+  }
+
+  function snapshotMarker() {
+    return String(state.bootstrap?.snapshot?.marker || '');
+  }
+
+  function scheduleSnapshotSync(delay = 45000) {
+    clearTimeout(state.snapshotSyncTimer);
+    if (!state.token) return;
+    state.snapshotSyncTimer = setTimeout(() => {
+      const run = () => syncOperationalSnapshot(false).catch(() => {});
+      if ('requestIdleCallback' in window) requestIdleCallback(run, {timeout:5000});
+      else run();
+    }, Math.max(5000, Number(delay || 0)));
+  }
+
+  async function syncOperationalSnapshot(force = false) {
+    if (!state.token) return null;
+    if (state.snapshotSyncPromise) return state.snapshotSyncPromise;
+    if (!force && Date.now() - Number(state.snapshotSyncLastAt || 0) < 30000) return null;
+    state.snapshotSyncLastAt = Date.now();
+    const operation = api('apiSincronizarSnapshot', state.token, force ? '' : snapshotMarker())
+      .then(result => {
+        if (result?.changed && result.bootstrap) {
+          configureBrowserCacheForUser(result.bootstrap.user || state.bootstrap?.user);
+          hydrateOperationalSnapshot(result.bootstrap, {render:true});
+          fillGlobalSelects();
+          void warmSnapshotThumbnails(result.bootstrap.thumbnailDocuments || []);
+        }
+        scheduleSnapshotSync(60000);
+        return result;
+      })
+      .catch(error => {
+        scheduleSnapshotSync(90000);
+        throw error;
+      })
+      .finally(() => { if (state.snapshotSyncPromise === operation) state.snapshotSyncPromise = null; });
+    state.snapshotSyncPromise = operation;
+    return operation;
+  }
+
+  async function warmSnapshotThumbnails(documents = []) {
+    if (!state.token || !Array.isArray(documents) || !documents.length) return;
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (connection?.saveData) return;
+    // O login recebe o índice completo de documentos, mas pré-carrega somente uma
+    // janela recente. O restante é carregado sob demanda e persistido no IndexedDB.
+    const preloadLimit = ['slow-2g','2g'].includes(String(connection?.effectiveType || '')) ? 24 : 120;
+    const eligible = documents.filter(document => document?.id && previewSupported(document.mimeType));
+    const queue = eligible.slice(0, preloadLimit);
+    const concurrency = ['slow-2g','2g'].includes(String(connection?.effectiveType || '')) ? 1 : 2;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < queue.length) {
+        const document = queue[cursor++];
+        try { await getVisualThumbnail(document.id, {force:false}); } catch (ignoreThumbnailWarm) {}
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    await Promise.all(Array.from({length:Math.min(concurrency, queue.length)}, worker));
+  }
+
+  async function loadApp(prefetchedBootstrap = null) {
+    let bootstrap = prefetchedBootstrap;
+    if (!bootstrap) {
+      try { bootstrap = await api('apiBootstrap', state.token); }
+      catch (error) { throw new Error('A autenticação foi aceita, porém o snapshot operacional não pôde ser carregado: ' + (error?.message || 'erro desconhecido')); }
+    }
+    state.bootstrap = bootstrap;
+    configureBrowserCacheForUser(bootstrap.user);
+    hydrateOperationalSnapshot(bootstrap, {render:false});
     $('#public-shell').classList.add('hidden');
     $('#app-shell').classList.remove('hidden');
     const user = state.bootstrap.user;
@@ -787,16 +983,21 @@
     $('#database-nav').classList.toggle('hidden', !databaseAccess);
     ['#database-map-btn','#database-rebuild-btn','#drive-rebuild-btn'].forEach(selector => $(selector)?.classList.toggle('hidden', !hasPermission('CONFIGURACAO_GERIR')));
     fillGlobalSelects();
-    void loadProcesses('dashboard').catch(() => {});
-    const warmLookup = () => { void api('apiAquecerCacheAutopreenchimento', state.token).catch(() => {}); };
-    if ('requestIdleCallback' in window) requestIdleCallback(warmLookup, {timeout:8000});
-    else setTimeout(warmLookup, 2500);
+    await loadProcesses('dashboard', {localOnly:true});
+    const warm = () => {
+      void warmSnapshotThumbnails(state.bootstrap.thumbnailDocuments || []);
+      void api('apiAquecerCacheAutopreenchimento', state.token).catch(() => {});
+      scheduleSnapshotSync(45000);
+    };
+    if ('requestIdleCallback' in window) requestIdleCallback(warm, {timeout:5000});
+    else setTimeout(warm, 900);
     if (user.mustChangePassword) openPasswordModal(true);
   }
 
   function saveSession(session) {
     state.token = session.token;
     localStorage.setItem('autentiko_token', state.token);
+    persistSessionConfirmation({expiresAt:session.expiresAt || ''});
   }
 
   function endSession(showMessage = true) {
@@ -806,7 +1007,17 @@
     state.bootstrap = null;
     state.admin = null;
     state.forcePasswordChange = false;
+    clearTimeout(state.snapshotSyncTimer);
+    state.snapshotSyncPromise = null;
+    state.allProcesses = [];
+    state.documentMetadataById.clear();
+    clearIdentityAiPrepared(false);
     localStorage.removeItem('autentiko_token');
+    localStorage.removeItem('autentiko_session_expires_at');
+    localStorage.removeItem('autentiko_session_confirmed_at');
+    state.sessionExpiresAt = '';
+    state.sessionConfirmedAt = 0;
+    state.authRecoveryPromise = null;
     showPublic();
     if (showMessage) authMessage('Sessão encerrada.', true);
   }
@@ -817,15 +1028,58 @@
     authMessage('');
   }
 
+  function currentProcessFormType() {
+    const select = $('#new-process-type');
+    const domType = String(select?.value || '').trim();
+    const editType = state.processFormMode === 'edit' ? String(state.currentProcess?.process?.type || '').trim() : '';
+    const type = domType || String(state.processSelectedType || '').trim() || editType;
+    if (type) state.processSelectedType = type;
+    return type;
+  }
+
+  function setProcessFormType(type, options = {}) {
+    const value = String(type || '').trim();
+    state.processSelectedType = value;
+    const select = $('#new-process-type');
+    if (!select) return value;
+    if (value && !Array.from(select.options).some(option => String(option.value) === value)) {
+      const known = (state.bootstrap?.processTypes || []).find(item => String(item.value) === value);
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = known?.label || statusText(value);
+      select.appendChild(option);
+    }
+    select.value = value;
+    if (Object.prototype.hasOwnProperty.call(options, 'disabled')) select.disabled = Boolean(options.disabled);
+    return value;
+  }
+
+  function replaceSelectOptionsPreservingValue(select, html, preferredValue = '') {
+    if (!select) return '';
+    const before = String(preferredValue || select.value || '').trim();
+    const wasDisabled = Boolean(select.disabled);
+    select.innerHTML = html;
+    if (before && Array.from(select.options).some(option => String(option.value) === before)) select.value = before;
+    select.disabled = wasDisabled;
+    return String(select.value || '').trim();
+  }
+
   function fillGlobalSelects() {
+    if (!state.bootstrap) return;
+    const activeFormType = currentProcessFormType();
+    const formTypeDisabled = Boolean($('#new-process-type')?.disabled) || state.processFormMode === 'edit';
     const statusOptions = state.bootstrap.statuses.map(status => `<option value="${esc(status)}">${esc(statusText(status))}</option>`).join('');
-    $('#dashboard-status').innerHTML = '<option value="">Todos os status</option>' + statusOptions;
-    $('#process-status').innerHTML = '<option value="">Todos os status</option>' + statusOptions;
+    replaceSelectOptionsPreservingValue($('#dashboard-status'), '<option value="">Todos os status</option>' + statusOptions);
+    replaceSelectOptionsPreservingValue($('#process-status'), '<option value="">Todos os status</option>' + statusOptions);
     const typeOptions = state.bootstrap.processTypes.map(type => `<option value="${esc(type.value)}">${esc(type.label)}</option>`).join('');
-    $('#process-type').innerHTML = '<option value="">Todos os tipos</option>' + typeOptions;
-    $('#new-process-type').innerHTML = '<option value="">Selecione...</option>' + typeOptions;
-    $('#field-type-filter').innerHTML = '<option value="">Todos os tipos</option>' + typeOptions;
-    $('#field-form [name=processType]').innerHTML = typeOptions;
+    replaceSelectOptionsPreservingValue($('#process-type'), '<option value="">Todos os tipos</option>' + typeOptions);
+    const processTypeSelect = $('#new-process-type');
+    if (processTypeSelect) {
+      processTypeSelect.innerHTML = '<option value="">Selecione...</option>' + typeOptions;
+      setProcessFormType(activeFormType, {disabled: formTypeDisabled});
+    }
+    replaceSelectOptionsPreservingValue($('#field-type-filter'), '<option value="">Todos os tipos</option>' + typeOptions);
+    replaceSelectOptionsPreservingValue($('#field-form [name=processType]'), typeOptions);
   }
 
   function renderMetrics(metrics = {}) {
@@ -849,6 +1103,28 @@
     return `${mode}|${JSON.stringify(filters || {})}`;
   }
 
+  function normalizeSearchText(value) {
+    return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim();
+  }
+
+  function localProcessResult(mode, filters) {
+    const search = normalizeSearchText(filters.search);
+    let rows = (state.allProcesses || []).filter(item => {
+      if (filters.status && item.status !== filters.status) return false;
+      if (filters.type && item.type !== filters.type) return false;
+      if (filters.mine && String(item.responsibleId || '') && String(item.responsibleId) !== String(state.bootstrap?.user?.id || '')) return false;
+      if (filters.mine && !item.responsibleId && normalizeSearchText(item.responsible) !== normalizeSearchText(state.bootstrap?.user?.name)) return false;
+      if (search) {
+        const haystack = normalizeSearchText([item.protocol,item.clientName,item.clientCpf,item.clientEmail,item.responsible,item.propertyAddress,item.typeLabel].join(' '));
+        if (!haystack.includes(search)) return false;
+      }
+      return true;
+    });
+    rows = rows.slice().sort((a,b) => new Date(b.createdAt || b.updatedAt || 0) - new Date(a.createdAt || a.updatedAt || 0));
+    const pageSize = Math.max(1, Number(filters.pageSize || (mode === 'dashboard' ? 20 : 100)));
+    return {items:rows.slice(0, pageSize), page:1, pageSize, total:rows.length, dashboard:state.bootstrap?.dashboard || {}};
+  }
+
   async function loadProcesses(mode = 'dashboard', options = {}) {
     const target = mode === 'dashboard' ? $('#dashboard-processes') : $('#all-processes');
     const filters = processFilters(mode);
@@ -858,26 +1134,28 @@
       if (!requestIsCurrent() || !Array.isArray(result?.items)) return;
       state.processes = result.items;
       renderProcesses(target, result.items);
-      renderMetrics(result.dashboard);
+      renderMetrics(result.dashboard || state.bootstrap?.dashboard || {});
     };
+
+    if (Array.isArray(state.allProcesses) && (state.allProcesses.length || Array.isArray(state.bootstrap?.processes))) {
+      const local = localProcessResult(mode, filters);
+      applyResult(local);
+      void browserCachePutJson('process-list', identity, local);
+      if (!options.localOnly) scheduleSnapshotSync(12000);
+      return local;
+    }
+
     const cached = options.force ? null : await browserCacheGetJson('process-list', identity);
     if (cached && Array.isArray(cached.items)) applyResult(cached);
     else if (!options.silent) target.innerHTML = '<div class="empty-state">Carregando processos...</div>';
-    const refresh = async () => {
+    try {
       const result = await api('apiListarProcessos', state.token, filters);
       void browserCachePutJson('process-list', identity, result);
       applyResult(result);
       return result;
-    };
-    if (cached && Array.isArray(cached.items) && !options.force) {
-      void refresh().catch(() => {});
-      return cached;
-    }
-    try {
-      return await refresh();
     } catch (error) {
       if (!options.silent) target.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
-      return null;
+      return cached || null;
     }
   }
 
@@ -1229,6 +1507,7 @@
   function patchVisibleProcessCard(item) {
     if (!item?.id) return;
     state.processes = state.processes.map(current => current.id === item.id ? {...current, ...item} : current);
+    state.allProcesses = (state.allProcesses || []).map(current => current.id === item.id ? {...current, ...item} : current);
     const selector = `[data-process-id="${CSS.escape(String(item.id))}"]`;
     $$(selector).forEach(row => {
       const host = document.createElement('div');
@@ -1341,8 +1620,11 @@
       state.processFormMode = 'create';
       state.processEditId = '';
       state.processEditExpectedVersion = 0;
+      state.processSelectedType = '';
+      state.processFormLoadNonce += 1;
       state.processDraftDirty = false;
       $('#new-process-type').disabled = false;
+      $('#new-process-type').value = '';
       openModal('detail-modal');
       return true;
     }
@@ -1363,10 +1645,13 @@
   }
 
   async function openNewProcess() {
+    clearIdentityAiPrepared(false);
     state.processFormMode = 'create';
     state.processEditId = '';
     state.processEditExpectedVersion = 0;
-    $('#new-process-type').disabled = false;
+    state.processSelectedType = '';
+    state.processFormLoadNonce += 1;
+    setProcessFormType('', {disabled:false});
     $('#process-modal-eyebrow').textContent = 'NOVO PROCESSO';
     $('#process-modal-title').textContent = 'Criar processo';
     $('#process-submit-btn').textContent = 'Próxima etapa: documentos →';
@@ -1377,7 +1662,7 @@
     openModal('process-modal');
     const draft = readShortProcessDraft();
     if (draft) {
-      $('#new-process-type').value = draft.type;
+      setProcessFormType(draft.type, {disabled:false});
       await loadDynamicForm(draft.type, draft.data || {});
       $('#income-acceptance-check').checked = Boolean(draft.incomeAccepted);
       state.processDraftDirty = true;
@@ -1397,14 +1682,16 @@
     const detail = state.currentProcess;
     const form = resetForm('#process-form');
     if (!form) return;
+    clearIdentityAiPrepared(false);
     state.processFormMode = 'edit';
     state.processEditId = detail.process.id;
     state.processEditExpectedVersion = Number(detail.process.version || detail.processTabVersion || 0);
+    state.processSelectedType = String(detail.process.type || '');
+    state.processFormLoadNonce += 1;
     $('#process-modal-eyebrow').textContent = `EDIÇÃO CONTROLADA · ${detail.process.protocol}`;
     $('#process-modal-title').textContent = 'Editar ficha cadastral';
     $('#process-submit-btn').textContent = 'Salvar alterações';
-    $('#new-process-type').value = detail.process.type;
-    $('#new-process-type').disabled = true;
+    setProcessFormType(detail.process.type, {disabled:true});
     openModal('process-modal');
     const draft = readShortProcessDraft(detail.process.type, detail.process.id);
     await loadDynamicForm(detail.process.type, draft?.data || detail.data || {});
@@ -1418,10 +1705,14 @@
 
   async function loadDynamicForm(type, values = {}) {
     const target = $('#dynamic-process-form');
+    type = String(type || currentProcessFormType() || '').trim();
+    const loadNonce = ++state.processFormLoadNonce;
     if (!type) {
-      target.innerHTML = '<div class="empty-state">Selecione o tipo de processo para carregar o formulário.</div>';
+      if (loadNonce === state.processFormLoadNonce) target.innerHTML = '<div class="empty-state">Selecione o tipo de processo para carregar o formulário.</div>';
       return;
     }
+    // Mantém o tipo funcional preso ao estado enquanto a ficha está aberta.
+    setProcessFormType(type, {disabled: state.processFormMode === 'edit'});
     try {
       if (!state.bootstrap.formSchemas[type]) {
         const cached = readProcessSessionEntry('form-schema', String(type));
@@ -1440,8 +1731,11 @@
           expiresAt:Date.now() + BROWSER_CACHE.formSchemaTtlMs
         });
       }
+      // Uma resposta antiga de outro tipo nunca pode sobrescrever o tipo mais novo.
+      if (loadNonce !== state.processFormLoadNonce || currentProcessFormType() !== type) return;
       renderDynamicForm(type, values);
     } catch (error) {
+      if (loadNonce !== state.processFormLoadNonce || currentProcessFormType() !== type) return;
       target.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
       toast(error.message, 'error');
     }
@@ -1468,6 +1762,7 @@
     });
     updateConditionalFields();
     updateIncomeAffordability();
+    updateIdentityAiLauncher(type);
   }
 
   function formSectionBlueprint(type) {
@@ -1834,6 +2129,389 @@
     return Array.from(found, ([value, label]) => ({value, label}));
   }
 
+  function identityAiRoleLabel(role, type = currentProcessFormType()) {
+    const processType = String(type || '');
+    const rental = processType.startsWith('ALUGUEL_');
+    const purchase = processType.startsWith('COMPRA_') || processType === 'COMPRA_VENDA_IMOVEL' || processType === 'IMOVEL_NA_PLANTA';
+    const capture = processType === 'CAPTACAO_HOMOLOGACAO_IMOVEL';
+    if (role === 'titular') {
+      if (rental) return 'Proprietário / locador';
+      if (purchase) return 'Proprietário / vendedor';
+      if (capture) return 'Proprietário / titular';
+      return 'Proprietário / titular';
+    }
+    if (rental) return 'Locatário';
+    if (purchase) return 'Comprador';
+    return 'Cliente / parte interessada';
+  }
+
+  function updateIdentityAiRoleHeadings(type = currentProcessFormType()) {
+    const titular = identityAiRoleLabel('titular', type);
+    const cliente = identityAiRoleLabel('cliente', type);
+    const titleTitular = $('#identity-ai-title-titular');
+    const helpTitular = $('#identity-ai-help-titular');
+    const titleCliente = $('#identity-ai-title-cliente');
+    const helpCliente = $('#identity-ai-help-cliente');
+    if (titleTitular) titleTitular.textContent = `RG · ${titular}`;
+    if (helpTitular) helpTitular.textContent = `Dados serão direcionados aos campos titular_* da ficha (${titular.toLowerCase()}).`;
+    if (titleCliente) titleCliente.textContent = `RG · ${cliente}`;
+    if (helpCliente) helpCliente.textContent = `Dados serão direcionados aos campos cliente_* da ficha (${cliente.toLowerCase()}).`;
+  }
+
+  function identityAiFieldLabels() {
+    return {
+      nome:'Nome completo', cpf:'CPF', nascimento:'Data de nascimento', documento:'RG / documento',
+      documento_expedicao:'Data de expedição', orgao_expedidor:'Órgão expedidor', estado_civil:'Estado civil',
+      nome_mae:'Nome da mãe', nome_pai:'Nome do pai'
+    };
+  }
+
+  function identityAiProviderPills(status = state.identityAi.providerStatus || state.bootstrap?.ai) {
+    const providers = status?.providers || [];
+    if (!providers.length) return '<span class="ai-health-pill off">IA não configurada</span>';
+    return providers.map(provider => `<span class="ai-health-pill ${provider.healthy?'ok':'off'}" title="${esc([provider.model,provider.message].filter(Boolean).join(' · '))}">${esc(provider.id)} · ${provider.healthy?'OK':'indisponível'}</span>`).join('');
+  }
+
+  function updateIdentityAiLauncher(type = currentProcessFormType()) {
+    const launcher = $('#identity-ai-launcher');
+    if (!launcher) return;
+    const hasTitular = Boolean($('[name="titular_nome"]', $('#dynamic-process-form')) || $('[name="titular_cpf"]', $('#dynamic-process-form')));
+    const hasCliente = Boolean($('[name="cliente_nome"]', $('#dynamic-process-form')) || $('[name="cliente_cpf"]', $('#dynamic-process-form')));
+    launcher.classList.toggle('hidden', !type || (!hasTitular && !hasCliente));
+    const status = $('#identity-ai-inline-status');
+    if (status) status.innerHTML = identityAiProviderPills(state.identityAi.providerStatus || state.bootstrap?.ai);
+    const button = $('#open-identity-ai');
+    if (button) {
+      const pending = state.identityAi.pendingDocuments?.length || 0;
+      button.textContent = pending ? `✓ ${pending} documento(s) aprovado(s)` : 'Ler documentos com IA';
+    }
+  }
+
+  function clearIdentityAiPrepared(keepPending = false) {
+    state.identityAi.analysis = null;
+    state.identityAi.files = {titular:null, cliente:null};
+    state.identityAi.prepared = {};
+    state.identityAi.analyzing = false;
+    if (!keepPending) state.identityAi.pendingDocuments = [];
+    ['titular','cliente'].forEach(role => {
+      const input = $(`#identity-ai-file-${role}`);
+      if (input) input.value = '';
+      const preview = $(`#identity-ai-preview-${role}`);
+      if (preview) { preview.className = 'identity-ai-preview empty'; preview.innerHTML = 'Nenhum documento selecionado.'; }
+      const result = $(`#identity-ai-result-${role}`);
+      if (result) { result.classList.add('hidden'); result.innerHTML = ''; }
+    });
+    const approve = $('#identity-ai-approve');
+    if (approve) approve.disabled = true;
+  }
+
+  async function blobToBase64(blob) {
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+      reader.onerror = () => reject(reader.error || new Error('Não foi possível preparar o arquivo.'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function canvasToJpegBlob(canvas, quality = .88) {
+    return await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Não foi possível converter o documento em imagem.')), 'image/jpeg', quality));
+  }
+
+  async function canvasToIdentityAiBlob(sourceCanvas, maxBytes = 950 * 1024) {
+    let working = sourceCanvas;
+    let best = null;
+    const qualities = [.82,.76,.70,.64,.58,.52];
+    for (let resize = 0; resize < 5; resize += 1) {
+      for (const quality of qualities) {
+        const candidate = await canvasToJpegBlob(working, quality);
+        if (!best || candidate.size < best.size) best = candidate;
+        if (candidate.size <= maxBytes) {
+          if (working !== sourceCanvas) { working.width = 1; working.height = 1; }
+          return candidate;
+        }
+      }
+      const nextWidth = Math.max(820, Math.round(working.width * .82));
+      const nextHeight = Math.max(820, Math.round(working.height * .82));
+      if (nextWidth >= working.width && nextHeight >= working.height) break;
+      const reduced = document.createElement('canvas');
+      reduced.width = nextWidth;
+      reduced.height = nextHeight;
+      const context = reduced.getContext('2d', {alpha:false});
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, reduced.width, reduced.height);
+      context.drawImage(working, 0, 0, working.width, working.height, 0, 0, reduced.width, reduced.height);
+      if (working !== sourceCanvas) { working.width = 1; working.height = 1; }
+      working = reduced;
+    }
+    if (working !== sourceCanvas) { working.width = 1; working.height = 1; }
+    return best || canvasToJpegBlob(sourceCanvas, .72);
+  }
+
+  async function prepareIdentityAiFile(file) {
+    if (!file) throw new Error('Selecione um arquivo.');
+    if (Number(file.size || 0) > 16 * 1024 * 1024) throw new Error('O arquivo ultrapassa 16 MB. Reduza o tamanho antes da leitura por IA.');
+    const mime = String(file.type || '').toLowerCase();
+    if (!['application/pdf','image/jpeg','image/png','image/webp'].includes(mime)) throw new Error('Use PDF, JPG, PNG ou WEBP.');
+    let canvas = document.createElement('canvas');
+    let cleanup = () => {};
+    try {
+      if (mime === 'application/pdf') {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const pdfjs = await loadPdfJs();
+        const assetBase = ['https:', '', 'cdn.jsdelivr.net/npm/pdfjs-dist@5.7.284'].join('/');
+        const pdf = await pdfjs.getDocument({data:bytes,cMapUrl:assetBase+'/cmaps/',cMapPacked:true,standardFontDataUrl:assetBase+'/standard_fonts/',wasmUrl:assetBase+'/wasm/'}).promise;
+        cleanup = () => { try { void pdf.destroy(); } catch (ignore) {} };
+        const pageCount = Math.min(Number(pdf.numPages || 1), 2);
+        const rendered = [];
+        let maxWidth = 1, totalHeight = 0;
+        for (let pageNo = 1; pageNo <= pageCount; pageNo += 1) {
+          const page = await pdf.getPage(pageNo);
+          const original = page.getViewport({scale:1});
+          const scale = Math.min(2.0, 1500 / Math.max(original.width, 1));
+          const viewport = page.getViewport({scale});
+          const pageCanvas = document.createElement('canvas');
+          pageCanvas.width = Math.max(1, Math.round(viewport.width));
+          pageCanvas.height = Math.max(1, Math.round(viewport.height));
+          const context = pageCanvas.getContext('2d', {alpha:false});
+          context.fillStyle = '#fff'; context.fillRect(0,0,pageCanvas.width,pageCanvas.height);
+          await page.render({canvasContext:context, viewport}).promise;
+          rendered.push(pageCanvas); maxWidth = Math.max(maxWidth, pageCanvas.width); totalHeight += pageCanvas.height + (pageNo < pageCount ? 16 : 0);
+        }
+        const maxCombinedHeight = 2300;
+        const reduce = Math.min(1, maxCombinedHeight / Math.max(totalHeight, 1), 1440 / Math.max(maxWidth, 1));
+        canvas.width = Math.max(1, Math.round(maxWidth * reduce));
+        canvas.height = Math.max(1, Math.round(totalHeight * reduce));
+        const context = canvas.getContext('2d', {alpha:false});
+        context.fillStyle = '#fff'; context.fillRect(0,0,canvas.width,canvas.height);
+        let y = 0;
+        rendered.forEach((pageCanvas, index) => {
+          const w = Math.round(pageCanvas.width * reduce), h = Math.round(pageCanvas.height * reduce);
+          context.drawImage(pageCanvas, 0, 0, pageCanvas.width, pageCanvas.height, 0, y, w, h);
+          y += h + (index < rendered.length - 1 ? Math.round(16 * reduce) : 0);
+          pageCanvas.width = pageCanvas.height = 1;
+        });
+      } else {
+        const bitmap = await createImageBitmap(file);
+        cleanup = () => { try { bitmap.close(); } catch (ignore) {} };
+        const scale = Math.min(1, 1440 / Math.max(bitmap.width, 1), 1440 / Math.max(bitmap.height, 1));
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        const context = canvas.getContext('2d', {alpha:false});
+        context.fillStyle = '#fff'; context.fillRect(0,0,canvas.width,canvas.height);
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      }
+      const blob = await canvasToIdentityAiBlob(canvas, 950 * 1024);
+      const base64 = await blobToBase64(blob);
+      return {mimeType:'image/jpeg', base64, previewUrl:`data:image/jpeg;base64,${base64}`, bytes:blob.size, pages:mime==='application/pdf'?'até 2':'1'};
+    } finally {
+      cleanup();
+      if (canvas) { canvas.width = canvas.height = 1; canvas = null; }
+    }
+  }
+
+  function renderIdentityAiFile(role) {
+    const file = state.identityAi.files[role];
+    const prepared = state.identityAi.prepared[role];
+    const preview = $(`#identity-ai-preview-${role}`);
+    if (!preview) return;
+    if (!file) { preview.className = 'identity-ai-preview empty'; preview.innerHTML = 'Nenhum documento selecionado.'; return; }
+    preview.className = 'identity-ai-preview';
+    preview.innerHTML = `${prepared?.previewUrl ? `<img src="${prepared.previewUrl}" alt="Prévia do documento">` : ''}<div class="identity-file-meta"><strong>${esc(file.name)}</strong><small>${esc(file.type || 'arquivo')} · ${formatBytes(file.size)}${prepared?' · preparado localmente':''}</small></div>`;
+  }
+
+  async function selectIdentityAiFile(role, file) {
+    if (!file) return;
+    state.identityAi.files[role] = file;
+    delete state.identityAi.prepared[role];
+    state.identityAi.analysis = null;
+    $('#identity-ai-approve').disabled = true;
+    renderIdentityAiFile(role);
+    const message = $('#identity-ai-message');
+    message.className = 'identity-ai-message';
+    message.textContent = `Preparando ${identityAiRoleLabel(role)} localmente…`;
+    try {
+      state.identityAi.prepared[role] = await prepareIdentityAiFile(file);
+      renderIdentityAiFile(role);
+      message.textContent = 'Documento preparado no navegador. Selecione o outro RG ou clique em Analisar documentos.';
+    } catch (error) {
+      delete state.identityAi.prepared[role];
+      message.className = 'identity-ai-message error';
+      message.textContent = error.message;
+    }
+  }
+
+  function renderIdentityAiStatus(status) {
+    state.identityAi.providerStatus = status || state.bootstrap?.ai || {providers:[]};
+    const host = $('#identity-ai-provider-status');
+    if (host) host.innerHTML = identityAiProviderPills(state.identityAi.providerStatus) + `<span>${state.identityAi.providerStatus?.available?'IA pronta; revisão humana obrigatória.':'Cadastro manual permanece disponível.'}</span>`;
+    updateIdentityAiLauncher();
+  }
+
+  async function refreshIdentityAiStatus(live = false) {
+    try {
+      const status = live ? await api('apiStatusIADocumentos', state.token, true) : (state.identityAi.providerStatus || state.bootstrap?.ai || await api('apiStatusIADocumentos', state.token, false));
+      renderIdentityAiStatus(status);
+      return status;
+    } catch (error) {
+      renderIdentityAiStatus({available:false,providers:[]});
+      $('#identity-ai-message').className = 'identity-ai-message error';
+      $('#identity-ai-message').textContent = `Não foi possível verificar as IAs agora: ${error.message}. A ficha manual continua funcionando normalmente.`;
+      return null;
+    }
+  }
+
+  async function openIdentityAiModal() {
+    state.identityAi.returnModal = 'process-modal';
+    updateIdentityAiRoleHeadings();
+    openModal('identity-ai-modal');
+    renderIdentityAiStatus(state.identityAi.providerStatus || state.bootstrap?.ai);
+    ['titular','cliente'].forEach(renderIdentityAiFile);
+    if (state.identityAi.analysis) renderIdentityAiAnalysis(state.identityAi.analysis);
+    else $('#identity-ai-approve').disabled = true;
+    if (!state.identityAi.providerStatus) void refreshIdentityAiStatus(false);
+  }
+
+  function closeIdentityAiModal() {
+    openModal(state.identityAi.returnModal || 'process-modal');
+  }
+
+  function renderIdentityAiAnalysis(analysis) {
+    const labels = identityAiFieldLabels();
+    ['titular','cliente'].forEach(role => {
+      const side = analysis?.[role] || {confidence:0,fields:{},warnings:[]};
+      const host = $(`#identity-ai-result-${role}`);
+      if (!host) return;
+      host.classList.remove('hidden');
+      host.innerHTML = `<div class="identity-ai-result-head"><strong>Dados lidos · ${esc(identityAiRoleLabel(role))}</strong><span class="identity-ai-confidence">Confiança ${Math.round(Number(side.confidence || 0) * 100)}%</span></div><div class="identity-ai-field-grid">${Object.entries(labels).map(([key,label]) => `<label class="${key==='nome'||key==='nome_mae'||key==='nome_pai'?'span-2':''}"><span>${esc(label)}</span><input data-identity-ai-field="${esc(key)}" data-identity-ai-role="${esc(role)}" type="${key.includes('expedicao')||key==='nascimento'?'date':'text'}" value="${esc(side.fields?.[key] || '')}"></label>`).join('')}</div>${side.warnings?.length?`<div class="identity-ai-warnings"><strong>Atenção:</strong> ${side.warnings.map(esc).join(' · ')}</div>`:''}`;
+    });
+  }
+
+  async function raceIdentityAiProviders(providerIds, payload) {
+    const ids = Array.from(new Set((providerIds || []).filter(id => ['GEMINI','OPENROUTER'].includes(id))));
+    if (!ids.length) return {success:false, attempts:[], message:'Nenhuma IA saudável está disponível agora.'};
+    const aiRequestId = requestId();
+    return await new Promise(resolve => {
+      let finished = false;
+      let remaining = ids.length;
+      const attempts = [];
+      const finish = result => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(limitTimer);
+        resolve({...result, attempts:[...attempts, ...(result?.attempts || [])]});
+      };
+      const limitTimer = setTimeout(() => finish({
+        success:false,
+        message:`A análise atingiu o limite de 42 segundos. ${attempts.length ? attempts.map(item => `${item.provider}: ${item.message || 'ainda sem resposta válida'}`).join(' · ') : 'Os provedores ainda não devolveram resposta válida.'} O formulário manual continua disponível.`
+      }), 43000);
+      ids.forEach(providerId => {
+        const startedAt = performance.now();
+        const aiContext = {...state.context, requestId:requestId(), aiRequestId};
+        api('apiAnalisarDocumentosIdentidadeProvedor', state.token, payload, providerId, aiContext)
+          .then(result => {
+            const attempt = {provider:providerId, success:Boolean(result?.success), latencyMs:Math.round(performance.now() - startedAt), message:result?.message || ''};
+            attempts.push(attempt);
+            if (result?.success && result?.analysis) return finish(result);
+            remaining -= 1;
+            if (remaining <= 0) finish({
+              success:false,
+              message:attempts.map(item => `${item.provider}: ${item.message || 'falha sem detalhe'}`).join(' · ') || 'Nenhum provedor conseguiu ler o documento.'
+            });
+          })
+          .catch(error => {
+            attempts.push({provider:providerId, success:false, latencyMs:Math.round(performance.now() - startedAt), message:error?.message || String(error)});
+            remaining -= 1;
+            if (remaining <= 0) finish({success:false, message:attempts.map(item => `${item.provider}: ${item.message}`).join(' · ')});
+          });
+      });
+    });
+  }
+
+  async function analyzeIdentityDocuments(button) {
+    const roles = ['titular','cliente'].filter(role => state.identityAi.files[role]);
+    if (!roles.length) return toast('Selecione ao menos um documento de identidade.', 'error');
+    setBusy(button, true, 'Lendo documentos…');
+    state.identityAi.analyzing = true;
+    try {
+      for (const role of roles) {
+        if (!state.identityAi.prepared[role]) state.identityAi.prepared[role] = await prepareIdentityAiFile(state.identityAi.files[role]);
+      }
+      const documents = roles.map(role => ({role,mimeType:state.identityAi.prepared[role].mimeType,base64:state.identityAi.prepared[role].base64}));
+      let status = state.identityAi.providerStatus || state.bootstrap?.ai;
+      if (!status?.providers?.some(provider => provider.healthy)) status = await refreshIdentityAiStatus(false);
+      const providerIds = (status?.providers || []).filter(provider => provider.healthy).map(provider => provider.id);
+      const message = $('#identity-ai-message');
+      if (!providerIds.length) {
+        message.className = 'identity-ai-message error';
+        message.textContent = 'Nenhuma IA está saudável neste momento. O preenchimento manual permanece disponível.';
+        $('#identity-ai-approve').disabled = true;
+        return;
+      }
+      message.className = 'identity-ai-message';
+      message.textContent = providerIds.length > 1
+        ? 'Gemini e OpenRouter estão analisando em paralelo. O primeiro resultado válido será exibido.'
+        : `${providerIds[0]} está analisando o documento.`;
+      const result = await raceIdentityAiProviders(providerIds, {processType:currentProcessFormType(), documents});
+      if (!result.success || !result.analysis) {
+        message.className = 'identity-ai-message error';
+        message.textContent = result.message || 'A IA não conseguiu ler estes documentos. Você pode continuar preenchendo manualmente.';
+        $('#identity-ai-approve').disabled = true;
+        return;
+      }
+      state.identityAi.analysis = result.analysis;
+      renderIdentityAiAnalysis(result.analysis);
+      $('#identity-ai-approve').disabled = false;
+      message.className = 'identity-ai-message success';
+      const elapsed = Math.max(1, Math.round(Number(result.latencyMs || 0) / 1000));
+      message.textContent = `${result.provider} concluiu a leitura em ${elapsed}s${result.cached?' (cache)':''}. Confira cada campo; nada foi aplicado à ficha ainda.`;
+    } catch (error) {
+      $('#identity-ai-message').className = 'identity-ai-message error';
+      $('#identity-ai-message').textContent = `${error.message} O preenchimento manual permanece disponível e o processo não foi alterado.`;
+      $('#identity-ai-approve').disabled = true;
+    } finally {
+      state.identityAi.analyzing = false;
+      setBusy(button, false);
+    }
+  }
+
+  function approveIdentityAiAnalysis() {
+    if (!state.identityAi.analysis) return;
+    let changed = 0;
+    ['titular','cliente'].forEach(role => {
+      $$(`[data-identity-ai-role="${role}"]`, $('#identity-ai-modal')).forEach(input => {
+        const suffix = input.dataset.identityAiField;
+        const value = String(input.value || '').trim();
+        if (!suffix || !value) return;
+        const control = $(`[name="${CSS.escape(`${role}_${suffix}`)}"]`, $('#dynamic-process-form'));
+        if (!control) return;
+        control.value = value;
+        if (control.dataset.mask) maskValue(control);
+        if (control.dataset.mask === 'cpf') validateCpfField(control);
+        changed += 1;
+      });
+    });
+    const pending = [];
+    if (state.identityAi.files.titular) pending.push({role:'titular',typeId:'DOC_RG_CNH_PROPRIETARIO',name:'RG/CNH do proprietário',file:state.identityAi.files.titular});
+    if (state.identityAi.files.cliente) pending.push({role:'cliente',typeId:'DOC_IDENTIDADE_CLIENTE',name:'RG/CNH',file:state.identityAi.files.cliente});
+    state.identityAi.pendingDocuments = pending;
+    updateConditionalFields();
+    updateIncomeAffordability();
+    scheduleShortProcessDraftSave();
+    closeIdentityAiModal();
+    updateIdentityAiLauncher();
+    toast(`${changed} campo(s) aprovados e preenchidos. Os ${pending.length} documento(s) serão anexados automaticamente após salvar o processo.`, 'success');
+  }
+
+  function flushIdentityAiDocuments(processId) {
+    const pending = (state.identityAi.pendingDocuments || []).slice();
+    if (!pending.length || !processId || String(state.currentProcess?.process?.id || '') !== String(processId)) return 0;
+    pending.forEach(document => enqueueDocumentUploads(document.typeId, [{file:document.file}], document.name));
+    state.identityAi.pendingDocuments = [];
+    updateIdentityAiLauncher();
+    return pending.length;
+  }
+
   function scheduleCustomerDatabaseLookup(input) {
     if (!input?.matches('[data-mask="cpf"]')) return;
     const digits = input.value.replace(/\D/g, '');
@@ -2006,7 +2684,7 @@
   }
 
   function incomeEvaluationFromForm() {
-    const type = $('#new-process-type').value;
+    const type = currentProcessFormType();
     const rental = ['ALUGUEL_ANUAL','ALUGUEL_SEMESTRAL','ALUGUEL_TRIMESTRAL','ALUGUEL_MENSAL'].includes(type);
     const income = parseCurrencyText($('[name="cliente_renda"]', $('#dynamic-process-form'))?.value);
     const rent = parseCurrencyText($('[name="valor_aluguel_mensal"]', $('#dynamic-process-form'))?.value || $('[name="valor_aluguel"]', $('#dynamic-process-form'))?.value || $('[name="valor_negociado"]', $('#dynamic-process-form'))?.value);
@@ -2030,8 +2708,9 @@
   async function submitProcess(event) {
     event.preventDefault();
     const button = $('button[type=submit]', event.currentTarget);
-    const type = $('#new-process-type').value;
-    if (!type) return toast('Selecione o tipo de processo.', 'error');
+    const type = currentProcessFormType();
+    if (!type) return toast('O tipo do processo não está definido. Selecione novamente o tipo para continuar.', 'error');
+    setProcessFormType(type, {disabled: state.processFormMode === 'edit'});
     if (!validateAllCpfFields()) return toast('Corrija o CPF indicado em vermelho para continuar.', 'error');
     const data = formObject($('#dynamic-process-form'));
     const incomeEvaluation = updateIncomeAffordability();
@@ -2058,9 +2737,14 @@
         state.processFormMode = 'create';
         state.processEditId = '';
         state.processEditExpectedVersion = 0;
-        $('#new-process-type').disabled = false;
         applySavedProcessFormLocally(processId, type, data, result);
+        state.processSelectedType = '';
+        state.processFormLoadNonce += 1;
+        $('#new-process-type').disabled = false;
+        $('#new-process-type').value = '';
+        const autoAttached = flushIdentityAiDocuments(processId);
         openModal('detail-modal');
+        if (autoAttached) toast(`${autoAttached} documento(s) de identidade aprovado(s) foram colocados na fila de upload.`, 'success');
         toast(`Ficha atualizada com segurança para a versão ${result.version}.`, 'success');
         scheduleProcessListRefresh();
       } catch (error) {
@@ -2081,9 +2765,13 @@
     try {
       const result = await api('apiCriarProcesso', state.token, {type,data}, state.context);
       clearShortProcessDraft(type);
+      state.processSelectedType = '';
+      state.processFormLoadNonce += 1;
+      setProcessFormType('', {disabled:false});
       closeModal(true);
       toast(`Processo ${result.process.protocol} criado. Agora envie os documentos.`, 'success');
       state.processes = [result.process, ...original.filter(item => item.id !== result.process.id)];
+      state.allProcesses = [result.process, ...(state.allProcesses || []).filter(item => item.id !== result.process.id)];
       renderProcesses(target, state.processes);
       scheduleProcessListRefresh();
       await openDocumentUploadStep(result.process.id, result.process.protocol);
@@ -2135,6 +2823,27 @@
     catch (ignoreStorageRestriction) {}
   }
 
+  function processNavigationState(processId) {
+    return readProcessSessionEntry('navigation', String(processId)) || {tab:'registration',scrolls:{},history:[]};
+  }
+
+  function saveProcessNavigationState(processId, patch = {}) {
+    if (!processId) return;
+    const current = processNavigationState(processId);
+    const next = {...current, ...patch, scrolls:{...(current.scrolls || {}), ...(patch.scrolls || {})}, expiresAt:Date.now() + 6 * 60 * 60 * 1000};
+    writeProcessSessionEntry('navigation', String(processId), next);
+  }
+
+  function rememberProcessHistory(processId) {
+    if (!processId) return;
+    try {
+      const key = processSessionKey('history', 'recent');
+      const stored = JSON.parse(sessionStorage.getItem(key) || '[]');
+      const list = [String(processId), ...(Array.isArray(stored) ? stored : []).filter(id => String(id) !== String(processId))].slice(0, 30);
+      sessionStorage.setItem(key, JSON.stringify(list));
+    } catch (ignoreStorageRestriction) {}
+  }
+
   function getProcessTabCache(processId, tab, processVersion) {
     const key = processTabCacheKey(processId, tab);
     const identity = `${String(processId)}:${normalizeProcessTab(tab)}`;
@@ -2151,7 +2860,7 @@
     return entry;
   }
 
-  function setProcessTabCache(processId, tab, payload) {
+  function setProcessTabCache(processId, tab, payload, persist = true) {
     const normalized = normalizeProcessTab(tab);
     const entry = {
       payload,
@@ -2160,7 +2869,7 @@
       lastAccess:Date.now()
     };
     state.processTabCache.set(processTabCacheKey(processId, normalized), entry);
-    writeProcessSessionEntry('process-tab', `${String(processId)}:${normalized}`, entry);
+    if (persist) writeProcessSessionEntry('process-tab', `${String(processId)}:${normalized}`, entry);
   }
 
   function invalidateProcessTabCache(processId, tabs) {
@@ -2185,10 +2894,10 @@
     return entry;
   }
 
-  function setProcessShellCache(processId, detail) {
+  function setProcessShellCache(processId, detail, persist = true) {
     const entry = {payload:detail, expiresAt:Date.now() + BROWSER_CACHE.processShellTtlMs};
     state.processShellCache.set(`${state.browserCacheNamespace}|${String(processId)}`, entry);
-    writeProcessSessionEntry('process-shell', String(processId), entry);
+    if (persist) writeProcessSessionEntry('process-shell', String(processId), entry);
   }
 
   function invalidateProcessShellCache(processId) {
@@ -2237,6 +2946,9 @@
     const next = detail || {};
     if (payload.data) next.data = payload.data;
     if (payload.formFields) next.formFields = payload.formFields;
+    if ((!next.formFields || !next.formFields.length) && next.process?.type) {
+      next.formFields = state.bootstrap?.formSchemas?.[next.process.type] || [];
+    }
     if (payload.requiredDocuments) next.requiredDocuments = payload.requiredDocuments;
     if (payload.documentGroups) next.documentGroups = payload.documentGroups;
     if (payload.documents) next.documents = payload.documents;
@@ -2334,7 +3046,11 @@
   async function openProcess(id, initialTab = 'registration') {
     const viewToken = ++state.processViewToken;
     clearVisualObjectUrls();
-    state.processDetailTab = normalizeProcessTab(initialTab);
+    rememberProcessHistory(id);
+    const navigation = processNavigationState(id);
+    const preferredTab = initialTab === 'registration' && navigation?.tab ? navigation.tab : initialTab;
+    state.processDetailTab = normalizeProcessTab(preferredTab);
+    Object.entries(navigation?.scrolls || {}).forEach(([tab, value]) => state.processTabScroll.set(`${id}|${normalizeProcessTab(tab)}`, Number(value || 0)));
     state.processLoadedTabs = new Set();
     state.processTabVersions = new Map();
     state.currentProcess = null;
@@ -2347,6 +3063,10 @@
       renderProcessShell(state.currentProcess);
       renderProcessPane(state.processDetailTab, state.currentProcess);
       renderedFromCache = true;
+      // Cache-first: o modal fica instantâneo. A revalidação do snapshot ocorre
+      // em segundo plano e só substitui a memória se houver mudança real.
+      scheduleSnapshotSync(1500);
+      return;
     } else if (shellCached?.payload) {
       state.currentProcess = shellCached.payload;
       renderProcessShell(state.currentProcess);
@@ -2518,8 +3238,10 @@
     const modal = $('#detail-modal');
     if (processId && modal) {
       state.processTabScroll.set(`${processId}|${state.processDetailTab}`, modal.scrollTop || 0);
+      saveProcessNavigationState(processId, {scrolls:{[state.processDetailTab]:modal.scrollTop || 0}});
     }
     state.processDetailTab = normalizeProcessTab(tab);
+    if (processId) saveProcessNavigationState(processId, {tab:state.processDetailTab});
     $$('[data-process-detail-tab]', $('#detail-modal')).forEach(button => button.classList.toggle('active', button.dataset.processDetailTab === state.processDetailTab));
     $$('[data-process-detail-pane]', $('#detail-content')).forEach(pane => pane.classList.toggle('active', pane.dataset.processDetailPane === state.processDetailTab));
     if (state.currentProcess) $('#detail-action-header').innerHTML = renderProcessActionHeader(state.currentProcess);
@@ -2807,7 +3529,7 @@
       }
     }
     let file;
-    const documentMetadata = (state.currentProcess?.documents || []).find(item => String(item.id) === String(documentId));
+    const documentMetadata = (state.currentProcess?.documents || []).find(item => String(item.id) === String(documentId)) || state.documentMetadataById.get(String(documentId));
     const sourceSize = Number(documentMetadata?.size || cloudMetadata?.size || 0);
     const automaticLocalFallbackAllowed = sourceSize > 0 && sourceSize <= AUTO_THUMBNAIL_SOURCE_LIMIT;
     try {
@@ -3222,6 +3944,8 @@
       const detail = {...base, ...documents};
       state.currentProcess = detail;
       renderDocumentUploadStep(detail);
+      const autoAttached = flushIdentityAiDocuments(processId);
+      if (autoAttached) toast(`${autoAttached} documento(s) de identidade aprovado(s) entraram na fila segura de upload.`, 'success');
     } catch (error) {
       $('#document-upload-content').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
       toast(error.message, 'error');
@@ -3289,10 +4013,9 @@
     clearTimeout(state.processListRefreshTimer);
     state.processListRefreshTimer = setTimeout(() => {
       const mode = $('.nav-btn.active')?.dataset.view === 'processes' ? 'processes' : 'dashboard';
-      const refresh = () => loadProcesses(mode, {silent:true, force:true}).catch(() => {});
-      if (globalThis.requestIdleCallback) requestIdleCallback(refresh, {timeout:2000});
-      else refresh();
-    }, 3500);
+      void loadProcesses(mode, {silent:true, localOnly:true});
+      scheduleSnapshotSync(1500);
+    }, 350);
   }
 
   async function syncProcessAfterMutation(tabs = [state.processDetailTab]) {
@@ -3941,7 +4664,7 @@
   }
 
   function documentCacheIdentity(id, override = {}) {
-    const metadata = state.currentProcess?.documents?.find(doc => doc.id === id) || {};
+    const metadata = state.currentProcess?.documents?.find(doc => String(doc.id) === String(id)) || state.documentMetadataById.get(String(id)) || {};
     return [
       String(id),
       String(override.hash || metadata.hash || 'sem-hash'),
@@ -4013,7 +4736,7 @@
   }
 
   function cloudDocumentMetadata(id) {
-    const metadata = state.currentProcess?.documents?.find(doc => doc.id === id) || null;
+    const metadata = state.currentProcess?.documents?.find(doc => String(doc.id) === String(id)) || state.documentMetadataById.get(String(id)) || null;
     return mediaCloudEnabled() && metadata?.mediaStatus === 'READY' ? metadata : null;
   }
 
@@ -5762,19 +6485,48 @@
 
   function wireEvents() {
     $$('.auth-tab').forEach(btn=>btn.addEventListener('click',()=>switchAuth(btn.dataset.authView)));
-    $('#login-form').addEventListener('submit',async event=>{event.preventDefault();const button=$('button[type=submit]',event.currentTarget);setBusy(button,true,'Entrando...');authMessage('');try{const form=formObject(event.currentTarget);const session=await api('apiLogin',{...form,context:state.context});saveSession(session);await loadApp();}catch(error){authMessage(error.message);}finally{setBusy(button,false);}});
+    $('#login-form').addEventListener('submit',async event=>{
+      event.preventDefault();
+      const button=$('button[type=submit]',event.currentTarget);
+      setBusy(button,true,'Entrando...');
+      authMessage('');
+      let authenticated=false;
+      try{
+        const form=formObject(event.currentTarget);
+        const session=await api('apiLogin',{...form,context:state.context});
+        saveSession(session);
+        authenticated=true;
+        await loadApp(session.bootstrap||null);
+        if(session.bootstrapError) toast('Login confirmado. O snapshot inicial precisou ser recuperado em uma segunda etapa: '+session.bootstrapError,'warning');
+      }catch(error){
+        authMessage(authenticated
+          ? 'Login confirmado, mas houve falha ao preparar os dados: '+(error?.message||'falha temporária')+'. Sua sessão foi mantida; atualize a página para tentar novamente.'
+          : (error?.message||'Não foi possível autenticar.'));
+      }finally{setBusy(button,false);}
+    });
     $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const button=$('button[type=submit]',form);setBusy(button,true);try{const data=formObject(form);data.context=state.context;const result=await api('apiCadastrarUsuario',data);authMessage(result.message,true);form.reset();}catch(error){authMessage(error.message);}finally{setBusy(button,false);}});
     $('#request-login-code').addEventListener('click',async event=>{const button=event.currentTarget;let sent=false;setBusy(button,true,'Enviando...');try{const result=await api('apiSolicitarTokenEmail',$('#email-form [name=email]').value,'LOGIN',state.context);sent=true;authMessage(result.message,true);}catch(error){authMessage(error.message);}finally{setBusy(button,false);if(sent)startCooldown(button,45);}});
-    $('#email-form').addEventListener('submit',async event=>{event.preventDefault();const button=$('button[type=submit]',event.currentTarget);setBusy(button,true);try{const data=formObject(event.currentTarget);const session=await api('apiEntrarComToken',data.email,data.token,state.context);saveSession(session);await loadApp();}catch(error){authMessage(error.message);}finally{setBusy(button,false);}});
+    $('#email-form').addEventListener('submit',async event=>{event.preventDefault();const button=$('button[type=submit]',event.currentTarget);setBusy(button,true);try{const data=formObject(event.currentTarget);const session=await api('apiEntrarComToken',data.email,data.token,state.context);saveSession(session);await loadApp(session.bootstrap||null);}catch(error){authMessage(error.message);}finally{setBusy(button,false);}});
     $('#request-reset-code').addEventListener('click',async event=>{const button=event.currentTarget;let sent=false;setBusy(button,true,'Enviando...');try{const result=await api('apiSolicitarTokenEmail',$('#recover-form [name=email]').value,'RESET',state.context);sent=true;authMessage(result.message,true);}catch(error){authMessage(error.message);}finally{setBusy(button,false);if(sent)startCooldown(button,45);}});
     $('#recover-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const button=$('button[type=submit]',form);setBusy(button,true);try{const data=formObject(form);const result=await api('apiRedefinirSenha',data.email,data.token,data.password,state.context);authMessage(result.message,true);form.reset();setTimeout(()=>switchAuth('login'),1200);}catch(error){authMessage(error.message);}finally{setBusy(button,false);}});
     $('#logout-btn').addEventListener('click',async()=>{try{await api('apiLogout',state.token,state.context);}catch{}endSession();});
     $('#change-password-btn').addEventListener('click',()=>openPasswordModal(false));
     $$('.nav-btn').forEach(btn=>btn.addEventListener('click',()=>showView(btn.dataset.view)));
     $('#new-process-btn').addEventListener('click',openNewProcess);$$('.js-new-process').forEach(btn=>btn.addEventListener('click',openNewProcess));
+    $('#open-identity-ai')?.addEventListener('click',openIdentityAiModal);
+    $('#identity-ai-close')?.addEventListener('click',closeIdentityAiModal);
+    $('#identity-ai-back')?.addEventListener('click',closeIdentityAiModal);
+    $('#identity-ai-check-status')?.addEventListener('click',async event=>{const button=event.currentTarget;setBusy(button,true,'Verificando…');try{await refreshIdentityAiStatus(true);}finally{setBusy(button,false);}});
+    $('#identity-ai-file-titular')?.addEventListener('change',event=>void selectIdentityAiFile('titular',event.target.files?.[0]));
+    $('#identity-ai-file-cliente')?.addEventListener('change',event=>void selectIdentityAiFile('cliente',event.target.files?.[0]));
+    $('#identity-ai-analyze')?.addEventListener('click',event=>void analyzeIdentityDocuments(event.currentTarget));
+    $('#identity-ai-approve')?.addEventListener('click',approveIdentityAiAnalysis);
     $('#new-process-type').addEventListener('change',async event=>{
-      const draft=readShortProcessDraft(event.target.value);
-      await loadDynamicForm(event.target.value,draft?.data||{});
+      const selectedType=setProcessFormType(event.target.value,{disabled:false});
+      clearIdentityAiPrepared(false);
+      const draft=readShortProcessDraft(selectedType);
+      await loadDynamicForm(selectedType,draft?.data||{});
+      if(currentProcessFormType()!==selectedType)return;
       $('#income-acceptance-check').checked=Boolean(draft?.incomeAccepted);
       state.processDraftDirty=Boolean(draft);
       if(draft)updateShortProcessDraftStatus(`Rascunho recuperado, salvo às ${new Date(draft.savedAt).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}.`,true);

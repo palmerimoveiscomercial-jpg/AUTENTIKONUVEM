@@ -121,7 +121,7 @@ function autCleanObject_(obj) {
 }
 
 function autPublicError_(err) {
-  var expectedCodes = ['VALIDATION_ERROR', 'AUTH_REQUIRED', 'SESSION_EXPIRED', 'USER_INACTIVE', 'FORBIDDEN', 'INVALID_CREDENTIALS', 'LOGIN_THROTTLED', 'DUPLICATE_USER', 'DUPLICATE_DOCUMENT', 'INVALID_TOKEN', 'INVALID_CURSOR', 'INVALID_JSON', 'INDEX_NOT_READY', 'DRIVE_INDEX_NOT_CONFIGURED', 'DRIVE_INDEX_LIMIT', 'NOT_FOUND', 'INVALID_TRANSITION', 'MISSING_DOCUMENTS', 'INCOME_ACCEPTANCE_REQUIRED', 'PAYLOAD_TOO_LARGE', 'FIELD_TOO_LARGE', 'INVALID_CPF', 'INVALID_EMAIL', 'INVALID_OPTION', 'INVALID_FILE', 'PREVIEW_DISABLED', 'PREVIEW_UNAVAILABLE', 'PREVIEW_TOO_LARGE', 'DOCUMENT_FILE_UNAVAILABLE', 'PROCESS_VERSION_REQUIRED', 'PROCESS_VERSION_CONFLICT', 'FEATURE_DISABLED', 'MEDIA_CONFIG_REQUIRED', 'AUDIT_ANCHOR_FAILED', 'SETUP_REQUIRED', 'MAINTENANCE', 'REMOTE_BACKEND_DISABLED', 'NEON_WRITE_DISABLED', 'EDITOR_ACCOUNT_REQUIRED', 'DATA_CLOUD_CONFIG_REQUIRED', 'DATA_CLOUD_INVALID_RESPONSE', 'DATA_CLOUD_REQUEST_FAILED', 'INTEGRATION_CONFIG_REQUIRED', 'INTEGRATION_TEST_REQUIRED', 'INTEGRATION_TEST_FAILED'];
+  var expectedCodes = ['VALIDATION_ERROR', 'AUTH_REQUIRED', 'SESSION_EXPIRED', 'USER_INACTIVE', 'FORBIDDEN', 'INVALID_CREDENTIALS', 'LOGIN_THROTTLED', 'DUPLICATE_USER', 'DUPLICATE_DOCUMENT', 'INVALID_TOKEN', 'INVALID_CURSOR', 'INVALID_JSON', 'INDEX_NOT_READY', 'DRIVE_INDEX_NOT_CONFIGURED', 'DRIVE_INDEX_LIMIT', 'NOT_FOUND', 'INVALID_TRANSITION', 'MISSING_DOCUMENTS', 'INCOME_ACCEPTANCE_REQUIRED', 'PAYLOAD_TOO_LARGE', 'FIELD_TOO_LARGE', 'INVALID_CPF', 'INVALID_EMAIL', 'INVALID_OPTION', 'INVALID_FILE', 'PREVIEW_DISABLED', 'PREVIEW_UNAVAILABLE', 'PREVIEW_TOO_LARGE', 'DOCUMENT_FILE_UNAVAILABLE', 'PROCESS_VERSION_REQUIRED', 'PROCESS_VERSION_CONFLICT', 'FEATURE_DISABLED', 'MEDIA_CONFIG_REQUIRED', 'AUDIT_ANCHOR_FAILED', 'SETUP_REQUIRED', 'MAINTENANCE', 'REMOTE_BACKEND_DISABLED', 'NEON_WRITE_DISABLED', 'EDITOR_ACCOUNT_REQUIRED', 'DATA_CLOUD_CONFIG_REQUIRED', 'DATA_CLOUD_INVALID_RESPONSE', 'DATA_CLOUD_REQUEST_FAILED', 'INTEGRATION_CONFIG_REQUIRED', 'INTEGRATION_TEST_REQUIRED', 'INTEGRATION_TEST_FAILED', 'AI_INVALID_RESPONSE', 'AI_PROVIDER_UNAVAILABLE', 'INVALID_DOCUMENT_ROLE', 'INVALID_DOCUMENT_TYPE', 'INVALID_PROCESS_TYPE', 'DOCUMENT_REQUIRED', 'FILE_TOO_LARGE'];
   var detail = err && err.stack ? err.stack : err;
   if (err && expectedCodes.indexOf(err.code) >= 0) console.warn(detail);
   else console.error(detail);
@@ -132,8 +132,30 @@ function autPublicError_(err) {
   };
 }
 
+function autSerializable_(value, depth) {
+  depth = Number(depth || 0);
+  if (depth > 30) return null;
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  var type = typeof value;
+  if (type === 'string' || type === 'number' || type === 'boolean') return value;
+  if (type === 'undefined' || type === 'function') return null;
+  if (Array.isArray(value)) return value.map(function(item) { return autSerializable_(item, depth + 1); });
+  if (Object.prototype.toString.call(value) === '[object Object]') {
+    var out = {};
+    Object.keys(value).forEach(function(key) {
+      var normalized = autSerializable_(value[key], depth + 1);
+      if (normalized !== undefined) out[key] = normalized;
+    });
+    return out;
+  }
+  // google.script.run não transporta Date e alguns objetos nativos do servidor.
+  // Retornar texto é preferível a derrubar toda a chamada RPC.
+  try { return String(value); } catch (ignore) { return null; }
+}
+
 function autResult_(data) {
-  return { ok: true, data: data == null ? null : data };
+  return { ok: true, data: data == null ? null : autSerializable_(data, 0) };
 }
 
 function autDateMs_(value) {

@@ -152,6 +152,68 @@ function autRequireAuth_(token, permission) {
   return authorized;
 }
 
+function autFindSessionDurableByHash_(tokenHash) {
+  tokenHash = String(tokenHash || '');
+  if (!tokenHash) return null;
+  var sheet = autSheet_('SESSOES');
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  var lastColumn = Math.max(sheet.getLastColumn(), 1);
+  var headers = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(function(value) { return String(value || '').trim(); });
+  var tokenColumn = headers.indexOf('TOKEN_HASH');
+  if (tokenColumn < 0) return null;
+  var match = sheet.getRange(2, tokenColumn + 1, lastRow - 1, 1)
+    .createTextFinder(tokenHash)
+    .matchEntireCell(true)
+    .matchCase(true)
+    .useRegularExpression(false)
+    .findNext();
+  if (!match) return null;
+  var values = sheet.getRange(match.getRow(), 1, 1, lastColumn).getValues()[0];
+  var row = { _row: match.getRow() };
+  headers.forEach(function(header, index) { if (header) row[header] = values[index]; });
+  return row;
+}
+
+/**
+ * Confirmação durável de sessão usada pelo HTML antes de efetuar logout automático.
+ * Esta função não depende do CacheService: consulta a linha real de SESSOES e repara
+ * o cache quando o token ainda é válido. Uma falha transitória de outra API não pode
+ * derrubar uma sessão confirmada aqui.
+ */
+function apiValidarSessao(token) {
+  try {
+    var rawToken = String(token || '');
+    if (!rawToken || rawToken.length > 256) return autResult_({ valid:false, code:'AUTH_REQUIRED', reason:'TOKEN_INVALIDO' });
+    var tokenHash = autHash_(rawToken);
+    var session = autFindSessionDurableByHash_(tokenHash);
+    if (!session || session.REVOGADO_EM) {
+      autRemoveSessionCacheByHash_(tokenHash);
+      return autResult_({ valid:false, code:'AUTH_REQUIRED', reason:'SESSAO_NAO_ENCONTRADA' });
+    }
+    if (autDateMs_(session.EXPIRA_EM) <= Date.now()) {
+      autRemoveSessionCacheByHash_(tokenHash);
+      return autResult_({ valid:false, code:'SESSION_EXPIRED', reason:'SESSAO_EXPIRADA', expiresAt:session.EXPIRA_EM || '' });
+    }
+    var user = autFind_('USUARIOS', 'ID_USUARIO', session.ID_USUARIO);
+    if (!user || String(user.STATUS) !== 'ATIVO') {
+      autRemoveSessionCacheByHash_(tokenHash);
+      return autResult_({ valid:false, code:'USER_INACTIVE', reason:'USUARIO_INATIVO' });
+    }
+    autCacheSession_(rawToken, session, user);
+    return autResult_({
+      valid:true,
+      code:'SESSION_OK',
+      confirmedAt:autNow_(),
+      expiresAt:session.EXPIRA_EM,
+      sessionId:session.ID_SESSAO,
+      user:autUserPublic_(user)
+    });
+  } catch (err) {
+    return autPublicError_(err);
+  }
+}
+
 function apiLogin(payload) {
   var lock = LockService.getScriptLock();
   try {
@@ -160,6 +222,17 @@ function apiLogin(payload) {
     var password = String(payload.password || '');
     autAssert_(login && password, 'Informe usuário/e-mail e senha.');
     autAssert_(login.length <= 254 && password.length <= 256, 'Credenciais inválidas.', 'INVALID_CREDENTIALS');
+
+    // Pré-aquece o snapshot, mas qualquer falha de API/cache é recuperável.
+    // A autenticação nunca deve depender da Google Sheets REST API.
+    var primeWarning = '';
+    try { autPrimeOperationalTables_({ force:false }); }
+    catch (primeError) {
+      primeWarning = String(primeError && primeError.message || primeError).slice(0, 240);
+      console.warn('Pré-carga operacional não bloqueante: ' + primeWarning);
+      AUTENTIKO_REQUEST_TABLES_ = {};
+    }
+
     lock.waitLock(30000);
     var user = autFindUserLogin_(login);
     autAssert_(user && user.STATUS !== 'EXCLUIDO', 'Credenciais inválidas.', 'INVALID_CREDENTIALS');
@@ -168,19 +241,34 @@ function apiLogin(payload) {
     }
     if (autPasswordHash_(password, user.SALT) !== String(user.SENHA_HASH)) {
       var attempts = Number(user.TENTATIVAS_FALHAS || 0) + 1;
-      var patch = { TENTATIVAS_FALHAS: attempts };
+      var patch = { TENTATIVAS_FALHAS:attempts };
       if (attempts >= 5) patch.BLOQUEADO_ATE = new Date(Date.now() + 15 * 60 * 1000).toISOString();
       autUpdateRow_('USUARIOS', user._row, patch);
-      autAudit_(user, 'LOGIN_FALHOU', 'USUARIO', user.ID_USUARIO, { tentativas: attempts }, payload.context);
+      autAudit_(user, 'LOGIN_FALHOU', 'USUARIO', user.ID_USUARIO, { tentativas:attempts }, payload.context);
       autAssert_(false, 'Credenciais inválidas.', 'INVALID_CREDENTIALS');
     }
     autAssert_(user.STATUS === 'ATIVO', user.STATUS === 'PENDENTE' ? 'Cadastro aguardando aprovação.' : 'Usuário bloqueado.', 'USER_INACTIVE');
-    autUpdateRow_('USUARIOS', user._row, { TENTATIVAS_FALHAS: 0, BLOQUEADO_ATE: '', ULTIMO_ACESSO: autNow_() });
+    var accessedAt = autNow_();
+    autUpdateRow_('USUARIOS', user._row, { TENTATIVAS_FALHAS:0, BLOQUEADO_ATE:'', ULTIMO_ACESSO:accessedAt });
+    user.ULTIMO_ACESSO = accessedAt;
     var session = autCreateSession_(user, payload.context);
     autAudit_(user, 'LOGIN_SUCESSO', 'USUARIO', user.ID_USUARIO, {}, payload.context);
+
+    // A credencial já foi validada. Montagem do snapshot é uma etapa separada e
+    // recuperável: uma integração lenta não devolve o usuário para a tela de login.
+    try { lock.releaseLock(); } catch (ignoreRelease) {}
+    try {
+      session.bootstrap = autGetOperationalBootstrap_(user, { force:false, bypassCache:false });
+    } catch (bootstrapError) {
+      session.bootstrap = null;
+      session.bootstrapError = String(bootstrapError && bootstrapError.message || bootstrapError).slice(0, 300);
+      session.bootstrapRecoverable = true;
+      console.error('Login autenticado; bootstrap adiado: ' + session.bootstrapError);
+    }
+    if (primeWarning) session.primeWarning = primeWarning;
     return autResult_(session);
   } catch (err) { return autPublicError_(err); }
-  finally { try { lock.releaseLock(); } catch (ignore) {} }
+  finally { try { if (lock.hasLock()) lock.releaseLock(); } catch (ignore) {} }
 }
 
 function apiLogout(token, context) {
