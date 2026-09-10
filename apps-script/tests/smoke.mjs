@@ -279,6 +279,7 @@ const sentEmails = [];
 const drivePermissions = new Map();
 const failedDrivePermissionDeletes = new Set();
 const drivePermissionListCalls = [];
+const sheetsBatchGetCalls = [];
 let legacyPublicRootId = '';
 
 const uiMock = {
@@ -384,6 +385,10 @@ const context = vm.createContext({
   UrlFetchApp: {
     fetch(url, options = {}) {
       const parsed = new URL(String(url));
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchGet')) {
+        sheetsBatchGetCalls.push(String(url));
+        return { getResponseCode: () => 404, getContentText: () => JSON.stringify({ error: 'fallback-smoke' }) };
+      }
       if (parsed.hostname === 'www.googleapis.com' && parsed.pathname === '/generate_204') {
         return { getResponseCode: () => 204, getContentText: () => '' };
       }
@@ -468,6 +473,32 @@ check('instalação completa', () => {
   assert.equal(context.autConfigMap_().ADOBE_ENABLED, false);
 });
 
+check('snapshot rápido não vaza para leitura ou atualização durável', () => {
+  const prime = context.autPrimeOperationalTables_({ force: true });
+  assert.ok(prime.tables.includes('CONFIGURACOES'));
+  assert.equal(context.autRequestTable_('CONFIGURACOES'), null, 'snapshot deve permanecer inativo fora do bootstrap');
+
+  context.AUTENTIKO_REQUEST_TABLES_ACTIVE_ = true;
+  const snapshotRow = context.autFind_('CONFIGURACOES', 'CHAVE', 'VERSAO_SISTEMA');
+  const configSheet = spreadsheet.getSheetByName('CONFIGURACOES');
+  const headers = context.autHeaders_(configSheet);
+  const descriptionColumn = headers.indexOf('DESCRICAO') + 1;
+  configSheet.getRange(snapshotRow._row, descriptionColumn).setValue('ALTERAÇÃO CONCORRENTE PRESERVADA');
+  context.autUpdateRow_('CONFIGURACOES', snapshotRow._row, { VALOR: snapshotRow.VALOR });
+  context.AUTENTIKO_REQUEST_TABLES_ACTIVE_ = false;
+
+  assert.equal(
+    configSheet.getRange(snapshotRow._row, descriptionColumn).getValue(),
+    'ALTERAÇÃO CONCORRENTE PRESERVADA',
+    'atualização parcial não pode regravar colunas antigas do snapshot'
+  );
+  const previousIdentity = context.AUTENTIKO_REQUEST_TABLES_IDENTITY_;
+  context.autTouchOperationalRevision_('PROCESSOS');
+  context.autPrimeOperationalTables_({ force: false });
+  assert.notEqual(context.AUTENTIKO_REQUEST_TABLES_IDENTITY_, previousIdentity, 'mudança operacional precisa renovar a identidade do snapshot');
+  assert.equal(context.AUTENTIKO_REQUEST_TABLES_ACTIVE_, false);
+});
+
 check('raiz documental privada rotaciona referências sem perder o histórico', () => {
   const installedRootId = properties.get('AUT_DOCUMENTS_FOLDER_ID');
   const installedRoot = folders.get(installedRootId);
@@ -529,7 +560,7 @@ check('diagnóstico seguro executável sem sessão', () => {
   const diagnostic = context.diagnosticarSistema();
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.formFields, installedFormCount);
-  assert.equal(diagnostic.codeVersion, '2.8.4');
+  assert.equal(diagnostic.codeVersion, '2.9.6');
   assert.ok(diagnostic.maxFormCacheBytes < 90_000);
 });
 
@@ -619,11 +650,12 @@ check('cofre de integrações não devolve segredos e bloqueia ativação sem te
   assert.equal(activation.code, 'INTEGRATION_TEST_REQUIRED');
 });
 
-check('bootstrap leve sem schema monolítico', () => {
+check('bootstrap operacional completo alimenta o HTML sem consultas em cascata', () => {
   const bootstrap = data(context.apiBootstrap(token));
-  assert.equal(Object.keys(bootstrap.formSchemas).length, 0);
+  assert.equal(Object.keys(bootstrap.formSchemas).length, context.AUTENTIKO.PROCESS_TYPES.length);
   assert.equal(bootstrap.processTypes.length, context.AUTENTIKO.PROCESS_TYPES.length);
-  assert.ok(Buffer.byteLength(JSON.stringify(bootstrap), 'utf8') < 60_000);
+  assert.ok(bootstrap.snapshot);
+  assert.ok(Buffer.byteLength(JSON.stringify(bootstrap), 'utf8') < 2_000_000);
 });
 
 let financedFields;
@@ -668,6 +700,7 @@ check('validações de tamanho, e-mail e opção', () => {
 
 let processId;
 check('criação, listagem e detalhe do processo', () => {
+  const batchReadsBeforeSave = sheetsBatchGetCalls.length;
   const created = data(context.apiCriarProcesso(token, { type: 'COMPRA_IMOVEL_FINANCIADO', data: processData }, { device: { browser: 'test' } }));
   processId = created.process.id;
   assert.ok(created.process.protocol);
@@ -676,6 +709,19 @@ check('criação, listagem e detalhe do processo', () => {
   assert.equal(detail.process.id, processId);
   assert.equal(detail.requiredDocuments.filter((doc) => doc.required).length, 5);
   assert.ok(detail.requiredDocuments.some((doc) => doc.name === 'RG/CNH' && doc.required && doc.multiple));
+  assert.equal(sheetsBatchGetCalls.length, batchReadsBeforeSave, 'salvar e abrir processo não pode carregar as 16 abas do snapshot');
+});
+
+check('IA documental valida limites e seleciona thinking compatível', () => {
+  const sample = 'a'.repeat(400);
+  const request = context.autAiValidatedIdentityRequest_({
+    processType: 'COMPRA_IMOVEL_FINANCIADO',
+    documents: [{ role: 'cliente', mimeType: 'image/jpeg', base64: sample }]
+  });
+  assert.equal(request.documents.length, 1);
+  assert.equal(context.autAiGeminiThinkingConfig_('gemini-3.8-flash').thinkingLevel, 'low');
+  assert.equal(context.autAiGeminiThinkingConfig_('gemini-3.5-flash-lite').thinkingLevel, 'minimal');
+  assert.throws(() => context.autAiValidatedIdentityRequest_({ documents: [] }), /Envie um ou dois documentos/);
 });
 
 check('índice materializado, filtros e cursor mantêm resposta JSON estável', () => {

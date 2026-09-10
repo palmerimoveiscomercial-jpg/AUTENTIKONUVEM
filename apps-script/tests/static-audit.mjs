@@ -102,13 +102,35 @@ check('correções estruturais contra os erros observados', () => {
   assert.match(serverSource, /bytes\s*>\s*95000/);
   assert.doesNotMatch(serverSource, /XFrameOptionsMode\.ALLOWALL/);
   assert.doesNotMatch(serverSource, /Math\.random/);
-  assert.doesNotMatch(scriptsHtml, /readAsDataURL|fileToBase64/);
+  assert.match(serverSource, /base64\.length\s*>\s*200\s*&&\s*base64\.length\s*<=\s*2600000/);
+  assert.match(serverSource, /documents\.length\s*>=\s*1\s*&&\s*documents\.length\s*<=\s*2/);
   assert.doesNotMatch(scriptsHtml, /event\.currentTarget\.reset\s*\(/);
   assert.match(scriptsHtml, /apiUploadDocumentoForm/);
   assert.match(scriptsHtml, /apiObterFormularioProcesso/);
   assert.match(serverSource, /if \(!e \|\| !e\.source\)/);
   assert.match(scriptsHtml, /root\?\.querySelectorAll\s*\?/);
   assert.match(scriptsHtml, /root\?\.querySelector\s*\?/);
+});
+
+check('snapshot acelerador fica isolado de gravações e documentos', () => {
+  assert.match(serverSource, /var AUTENTIKO_REQUEST_TABLES_ACTIVE_\s*=\s*false/);
+  assert.match(serverSource, /if \(!AUTENTIKO_REQUEST_TABLES_ACTIVE_\) return null/);
+  assert.match(serverSource, /AUTENTIKO_REQUEST_TABLES_ACTIVE_\s*=\s*true;[\s\S]*?finally\s*\{[\s\S]*?AUTENTIKO_REQUEST_TABLES_ACTIVE_\s*=\s*false/);
+  assert.match(serverSource, /var row = range\.getValues\(\)\[0\]/);
+  assert.match(serverSource, /var cacheIdentity = marker/);
+  assert.match(serverSource, /autHash_\(\[user\.ID_USUARIO, marker\]\.join\('\|'\)\)/);
+  assert.doesNotMatch(
+    serverSource.match(/function autRequireProcess_\([\s\S]*?\n\}/)?.[0] || '',
+    /autPrimeOperationalTables_/,
+    'operações protegidas não devem carregar o snapshot completo'
+  );
+});
+
+check('anexos aprovados pela IA carregam contexto explícito do processo', () => {
+  assert.match(scriptsHtml, /function flushIdentityAiDocuments\(processId, processVersion = 1\)/);
+  assert.match(scriptsHtml, /\{processId, expectedVersion:processVersion\}/);
+  assert.match(scriptsHtml, /function enqueueDocumentUploads\(typeId, items, documentName, options = \{\}\)/);
+  assert.match(scriptsHtml, /options\.processId \|\| state\.currentProcess/);
 });
 
 check('nenhuma credencial temporária fixa no código', () => {
@@ -343,9 +365,10 @@ check('modal estável com quatro abas e carregamento sob demanda', () => {
   assert.match(serverSource, /REGISTRATION:\s*'CADASTRO'/);
   assert.match(scriptsHtml, /function syncProcessAfterMutation/);
   assert.match(scriptsHtml, /function applySavedProcessFormLocally/);
-  assert.match(scriptsHtml, /loadProcesses\(mode, \{silent:true, force:true\}\)/);
+  assert.match(scriptsHtml, /loadProcesses\(mode, \{silent:true, localOnly:true\}\)/);
+  assert.match(scriptsHtml, /scheduleSnapshotSync\(1500\)/);
   assert.match(scriptsHtml, /browserCacheGetJson\('process-list', identity\)/);
-  assert.match(scriptsHtml, /void loadProcesses\('dashboard'\)/);
+  assert.match(scriptsHtml, /await loadProcesses\('dashboard', \{localOnly:true\}\)/);
   assert.doesNotMatch(scriptsHtml, /Promise\.all\(\[loadProcesses\('dashboard'\), openProcess/);
   assert.match(scriptsHtml, /if \(payload\.formFields\) next\.formFields = payload\.formFields/);
   assert.match(scriptsHtml, /const shellCached = getProcessShellCache\(id\)/);
@@ -389,7 +412,7 @@ check('cache seguro, resistente e sem recarregar prévias ou abas', () => {
   assert.match(scriptsHtml, /if \(!rendered\) renderProcessPane/);
   assert.doesNotMatch(scriptsHtml, /state\.processLoadedTabs\.has\(normalized\)\)\s*\{\s*renderProcessPane/);
   assert.match(scriptsHtml, /state\.processTabScroll\.set/);
-  assert.match(scriptsHtml, /schemaVersion:\s*'2\.5\.5'/);
+  assert.match(scriptsHtml, /schemaVersion:\s*'2\.9\.3'/);
   assert.match(scriptsHtml, /const busyButton = button instanceof HTMLButtonElement \? button : null/);
   assert.match(scriptsHtml, /function restoreVisualThumbnailsAfterPreview/);
   assert.doesNotMatch(scriptsHtml, /setBusy\(button, true, 'Abrindo\.\.\.'\)/);

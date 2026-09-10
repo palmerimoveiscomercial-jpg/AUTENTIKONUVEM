@@ -829,7 +829,43 @@ function autAiGeminiCanonicalModel_(model) {
   return String(model || '').trim().replace(/^models\//i, '');
 }
 
-function autAiGeminiModelCandidates_(values) {
+function autAiGeminiModelRank_(model) {
+  model = autAiGeminiCanonicalModel_(model).toLowerCase();
+  var family = /flash-lite/.test(model) ? 0 : /flash/.test(model) ? 100 : 500;
+  if (/image|tts|live|audio|native/.test(model)) family += 1000;
+  var version = model.match(/gemini-(\d+)(?:\.(\d+))?/);
+  var recency = version ? Number(version[1] || 0) * 100 + Number(version[2] || 0) : 0;
+  return family - recency;
+}
+
+function autAiGeminiDiscoverModels_(values, options) {
+  values = values || {};
+  options = options || {};
+  var baseUrl = String(values.baseUrl || '').replace(/\/+$/, '');
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'AUT_AI_GEMINI_MODELS_V1_' + autHash_([baseUrl, values.apiKey].join('|'));
+  var cached = !options.force ? autJsonParse_(cache.get(cacheKey), null) : null;
+  if (Array.isArray(cached) && cached.length) return cached;
+  var result = autIntegrationFetch_(baseUrl + '/models?pageSize=1000', {
+    method:'get', headers:{'X-Goog-Api-Key':values.apiKey}
+  }, 'Gemini');
+  var models = (result.json && result.json.models || []).filter(function(model) {
+    var name = autAiGeminiCanonicalModel_(model && model.name);
+    var methods = model && model.supportedGenerationMethods || [];
+    return /^gemini-/i.test(name) && /flash/i.test(name) &&
+      !/image|tts|live|audio|native/i.test(name) && methods.indexOf('generateContent') >= 0;
+  }).map(function(model) { return autAiGeminiCanonicalModel_(model.name); });
+  models = models.filter(function(model, index, list) { return model && list.indexOf(model) === index; });
+  models.sort(function(left, right) {
+    var rank = autAiGeminiModelRank_(left) - autAiGeminiModelRank_(right);
+    return rank || left.localeCompare(right);
+  });
+  autAssert_(models.length, 'A chave Gemini não disponibilizou um modelo Flash compatível com leitura documental.', 'AI_GEMINI_MODEL_REQUIRED');
+  autCachePut_(cache, cacheKey, models, 600);
+  return models;
+}
+
+function autAiGeminiModelCandidates_(values, discovered) {
   var configured = autAiGeminiCanonicalModel_(values && (values.visionModel || values.model) || '');
   var candidates = [];
   function add(model) {
@@ -837,22 +873,15 @@ function autAiGeminiModelCandidates_(values) {
     if (model && candidates.indexOf(model) < 0) candidates.push(model);
   }
 
-  // As contas/projetos novos deixaram de receber acesso aos 2.5 Flash-Lite.
-  // Para essas configurações antigas, migramos diretamente para o modelo de
-  // baixa latência indicado para extração documental.
-  if (!configured || /^gemini-2\.5-(?:flash|flash-lite)/i.test(configured)) {
-    add('gemini-3.5-flash-lite');
-    add('gemini-3.1-flash-lite');
-    add('gemini-3.5-flash');
-    add('gemini-3.6-flash');
-    add(configured);
-  } else {
-    add(configured);
-    add('gemini-3.5-flash-lite');
-    add('gemini-3.1-flash-lite');
-    add('gemini-3.5-flash');
-    add('gemini-3.6-flash');
-  }
+  add(configured);
+  (discovered || []).forEach(add);
+  // Contingência para o caminho quente. Se o modelo não existir para a chave,
+  // a próxima tentativa usa o catálogo real retornado por GET /models.
+  add('gemini-3.5-flash-lite');
+  add('gemini-3.1-flash-lite');
+  add('gemini-3.5-flash');
+  add('gemini-3.6-flash');
+  add('gemini-flash-latest');
   return candidates;
 }
 
@@ -874,7 +903,8 @@ function autAiGeminiResolveVisionModel_(values, options) {
   values = values || {};
   options = options || {};
   var configured = autAiGeminiCanonicalModel_(values.visionModel || values.model);
-  var candidates = autAiGeminiModelCandidates_(values);
+  var discovered = options.verify ? autAiGeminiDiscoverModels_(values, { force:!!options.force }) : [];
+  var candidates = autAiGeminiModelCandidates_(values, discovered);
   autAssert_(candidates.length, 'Nenhum modelo Gemini foi configurado para leitura documental.', 'AI_GEMINI_MODEL_REQUIRED');
 
   // No caminho quente não fazemos uma chamada extra ao catálogo. A migração
@@ -887,26 +917,17 @@ function autAiGeminiResolveVisionModel_(values, options) {
     return {model:hot,migrated:migratedHot,httpStatus:0};
   }
 
-  var lastError = null;
-  for (var i = 0; i < candidates.length; i++) {
-    var model = candidates[i];
-    try {
-      var result = autIntegrationFetch_(String(values.baseUrl || '').replace(/\/+$/, '') + '/models/' + encodeURIComponent(model), {
-        method:'get', headers:{'X-Goog-Api-Key':values.apiKey}
-      }, 'Gemini');
-      var migrated = !!configured && model !== configured;
-      if (options.persist !== false && (migrated || !configured)) autAiGeminiPersistVisionModel_(model);
-      return {model:model,migrated:migrated,httpStatus:result.status};
-    } catch (error) {
-      lastError = error;
-      if (!autAiGeminiUnavailableModelError_(error)) throw error;
-    }
-  }
-  throw lastError || new Error('Nenhum modelo Gemini documental compatível está disponível para esta chave.');
+  var model = discovered.indexOf(configured) >= 0 ? configured : discovered[0];
+  var migrated = !!configured && model !== configured;
+  if (options.persist !== false && (migrated || !configured)) autAiGeminiPersistVisionModel_(model);
+  return {model:model,migrated:migrated,httpStatus:200};
 }
 
 function autAiGeminiThinkingConfig_(model) {
   model = autAiGeminiCanonicalModel_(model).toLowerCase();
+  // 3.7/3.8 não aceitam "minimal"; "low" preserva baixa latência em toda a
+  // família 3.x. Os Flash-Lite anteriores continuam aceitando minimal.
+  if (/^gemini-3\.(?:7|8)-/.test(model)) return {thinkingLevel:'low'};
   if (/^gemini-3/.test(model)) return {thinkingLevel:'minimal'};
   if (/^gemini-2\.5-/.test(model)) return {thinkingBudget:0};
   return null;
@@ -952,11 +973,14 @@ function autAiGeminiIdentity_(documents, processType) {
   var values = autIntegrationResolvedValues_(integration, {});
   var configured = autAiGeminiCanonicalModel_(values.visionModel || values.model);
   var candidates = autAiGeminiModelCandidates_(values);
-  var maxAttempts = Math.min(2, candidates.length); // evita cascata lenta de modelos.
+  var maxAttempts = 2; // evita cascata lenta de modelos.
   var lastError = null;
+  var attempted = {};
 
-  for (var i = 0; i < maxAttempts; i++) {
-    var model = candidates[i];
+  for (var i = 0; i < maxAttempts && candidates.length; i++) {
+    var model = candidates.shift();
+    if (attempted[model]) { i--; continue; }
+    attempted[model] = true;
     try {
       var result = autAiGeminiRequest_(values, model, documents, processType);
       var output = autAiGeminiParseResult_(result, model);
@@ -966,6 +990,10 @@ function autAiGeminiIdentity_(documents, processType) {
       lastError = error;
       var retryableModel = autAiGeminiUnavailableModelError_(error) || String(error && error.code || '') === 'AI_INVALID_RESPONSE';
       if (!retryableModel || i + 1 >= maxAttempts) break;
+      if (autAiGeminiUnavailableModelError_(error)) {
+        var discovered = autAiGeminiDiscoverModels_(values, { force:false });
+        candidates = autAiGeminiModelCandidates_(values, discovered).filter(function(candidate) { return !attempted[candidate]; });
+      }
     }
   }
   throw lastError || new Error('O Gemini não conseguiu analisar o documento.');

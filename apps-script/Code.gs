@@ -221,7 +221,7 @@ function autBootstrapThumbnailDocuments_(visible) {
 function autBuildOperationalBootstrap_(user, options) {
   options = options || {};
   var started = Date.now();
-  var prime = autPrimeOperationalTables_({ force:!!options.force });
+  var prime = options.prime || { cacheHit:false };
   var base = autOperationalBootstrapBase_(user);
   var visible = autVisibleProcesses_(user).sort(function(a, b) { return autDateMs_(b.CRIADO_EM) - autDateMs_(a.CRIADO_EM); });
   var cards = visible.map(function(process) { return Object.assign(autProcessCard_(process), { responsibleId:String(process.ID_RESPONSAVEL || '') }); });
@@ -302,17 +302,30 @@ function autBuildOperationalBootstrap_(user, options) {
 
 function autGetOperationalBootstrap_(user, options) {
   options = options || {};
-  var revision = autOperationalRevision_();
-  var key = 'AUT_APP_SNAPSHOT_291_' + autHash_([user.ID_USUARIO, revision].join('|'));
+  // O marcador inclui a revisão interna e a última alteração externa da
+  // planilha. Assim, uma edição direta no Sheets nunca recebe dados antigos
+  // de um snapshot que foi construído antes dela.
+  var marker = autOperationalExternalMarker_();
+  var key = 'AUT_APP_SNAPSHOT_291_' + autHash_([user.ID_USUARIO, marker].join('|'));
   var cache = CacheService.getScriptCache();
   var cached = !options.force && !options.bypassCache ? autLargeCacheGet_(cache, key) : null;
   if (cached && cached.user && cached.snapshot) {
     cached.user = autUserPublic_(user);
     cached.snapshot.cacheHit = true;
-    cached.snapshot.marker = autOperationalExternalMarker_();
+    cached.snapshot.marker = marker;
     return cached;
   }
-  var built = autBuildOperationalBootstrap_(user, options);
+  var prime = autPrimeOperationalTables_({ force:!!options.force });
+  var built;
+  AUTENTIKO_REQUEST_TABLES_ACTIVE_ = true;
+  try {
+    var buildOptions = Object.assign({}, options, { prime:prime });
+    built = autBuildOperationalBootstrap_(user, buildOptions);
+  } finally {
+    // Não permita que o snapshot acelerador contamine chamadas posteriores no
+    // mesmo runtime (salvar, autenticar, baixar ou sincronizar documentos).
+    AUTENTIKO_REQUEST_TABLES_ACTIVE_ = false;
+  }
   autLargeCachePut_(cache, key, built, 300);
   return built;
 }

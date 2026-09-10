@@ -223,16 +223,6 @@ function apiLogin(payload) {
     autAssert_(login && password, 'Informe usuário/e-mail e senha.');
     autAssert_(login.length <= 254 && password.length <= 256, 'Credenciais inválidas.', 'INVALID_CREDENTIALS');
 
-    // Pré-aquece o snapshot, mas qualquer falha de API/cache é recuperável.
-    // A autenticação nunca deve depender da Google Sheets REST API.
-    var primeWarning = '';
-    try { autPrimeOperationalTables_({ force:false }); }
-    catch (primeError) {
-      primeWarning = String(primeError && primeError.message || primeError).slice(0, 240);
-      console.warn('Pré-carga operacional não bloqueante: ' + primeWarning);
-      AUTENTIKO_REQUEST_TABLES_ = {};
-    }
-
     lock.waitLock(30000);
     var user = autFindUserLogin_(login);
     autAssert_(user && user.STATUS !== 'EXCLUIDO', 'Credenciais inválidas.', 'INVALID_CREDENTIALS');
@@ -265,7 +255,6 @@ function apiLogin(payload) {
       session.bootstrapRecoverable = true;
       console.error('Login autenticado; bootstrap adiado: ' + session.bootstrapError);
     }
-    if (primeWarning) session.primeWarning = primeWarning;
     return autResult_(session);
   } catch (err) { return autPublicError_(err); }
   finally { try { if (lock.hasLock()) lock.releaseLock(); } catch (ignore) {} }

@@ -2503,10 +2503,15 @@
     toast(`${changed} campo(s) aprovados e preenchidos. Os ${pending.length} documento(s) serão anexados automaticamente após salvar o processo.`, 'success');
   }
 
-  function flushIdentityAiDocuments(processId) {
+  function flushIdentityAiDocuments(processId, processVersion = 1) {
     const pending = (state.identityAi.pendingDocuments || []).slice();
-    if (!pending.length || !processId || String(state.currentProcess?.process?.id || '') !== String(processId)) return 0;
-    pending.forEach(document => enqueueDocumentUploads(document.typeId, [{file:document.file}], document.name));
+    if (!pending.length || !processId) return 0;
+    pending.forEach(document => enqueueDocumentUploads(
+      document.typeId,
+      [{file:document.file}],
+      document.name,
+      {processId, expectedVersion:processVersion}
+    ));
     state.identityAi.pendingDocuments = [];
     updateIdentityAiLauncher();
     return pending.length;
@@ -2742,7 +2747,7 @@
         state.processFormLoadNonce += 1;
         $('#new-process-type').disabled = false;
         $('#new-process-type').value = '';
-        const autoAttached = flushIdentityAiDocuments(processId);
+        const autoAttached = flushIdentityAiDocuments(processId, result.version);
         openModal('detail-modal');
         if (autoAttached) toast(`${autoAttached} documento(s) de identidade aprovado(s) foram colocados na fila de upload.`, 'success');
         toast(`Ficha atualizada com segurança para a versão ${result.version}.`, 'success');
@@ -2774,6 +2779,8 @@
       state.allProcesses = [result.process, ...(state.allProcesses || []).filter(item => item.id !== result.process.id)];
       renderProcesses(target, state.processes);
       scheduleProcessListRefresh();
+      const autoAttached = flushIdentityAiDocuments(result.process.id, result.process.version || 1);
+      if (autoAttached) toast(`${autoAttached} documento(s) de identidade aprovado(s) entraram na fila segura de upload.`, 'success');
       await openDocumentUploadStep(result.process.id, result.process.protocol);
     } catch (error) {
       renderProcesses(target, original);
@@ -3944,7 +3951,7 @@
       const detail = {...base, ...documents};
       state.currentProcess = detail;
       renderDocumentUploadStep(detail);
-      const autoAttached = flushIdentityAiDocuments(processId);
+      const autoAttached = flushIdentityAiDocuments(processId, detail.process?.version || 1);
       if (autoAttached) toast(`${autoAttached} documento(s) de identidade aprovado(s) entraram na fila segura de upload.`, 'success');
     } catch (error) {
       $('#document-upload-content').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
@@ -5682,14 +5689,15 @@
     }).join('');
   }
 
-  function enqueueDocumentUploads(typeId, items, documentName) {
-    const processId = state.currentProcess?.process?.id;
+  function enqueueDocumentUploads(typeId, items, documentName, options = {}) {
+    const processId = options.processId || state.currentProcess?.process?.id || state.documentUploadProcessId;
     if (!processId) return;
+    const expectedVersion = Number(options.expectedVersion || state.currentProcess?.process?.version || 1);
     items.forEach(item => {
       const id = requestId();
       state.uploadJobs.set(id, {
         id, processId, typeId, documentName, file:item.file, fileName:item.file.name,
-        size:item.file.size, expectedVersion:state.currentProcess?.process?.version || 1,
+        size:item.file.size, expectedVersion,
         status:'queued', error:'', createdAt:Date.now()
       });
       state.uploadQueue.push(id);

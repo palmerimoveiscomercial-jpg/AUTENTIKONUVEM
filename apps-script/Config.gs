@@ -1,6 +1,6 @@
 var AUTENTIKO = Object.freeze({
   APP_NAME: 'AUTENTIKO OK NUVEM',
-  APP_VERSION: '2.9.2',
+  APP_VERSION: '2.9.6',
   SPREADSHEET_ID: '1KxsKxHCRdznYQQjz1IGL04u3v_z1kHVDtx07uxT3fF8',
   TIMEZONE: 'America/Sao_Paulo',
   SESSION_HOURS: 12,

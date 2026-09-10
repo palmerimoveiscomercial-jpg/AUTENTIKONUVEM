@@ -2,6 +2,12 @@ var AUTENTIKO_DB_INSTANCE_ = null;
 var AUTENTIKO_SHEET_INSTANCES_ = {};
 
 var AUTENTIKO_REQUEST_TABLES_ = {};
+// O snapshot em memória só pode ser consultado enquanto uma resposta de
+// bootstrap está sendo montada. Apps Script pode reutilizar o mesmo runtime
+// em chamadas futuras; sem esta trava, gravações e downloads enxergariam
+// linhas antigas que ficaram em memória depois do login.
+var AUTENTIKO_REQUEST_TABLES_ACTIVE_ = false;
+var AUTENTIKO_REQUEST_TABLES_IDENTITY_ = '';
 var AUTENTIKO_OPERATIONAL_BATCH_VERSION_ = '2.9.1';
 var AUTENTIKO_OPERATIONAL_TABLE_NAMES_ = [
   'CONFIGURACOES', 'USUARIOS', 'PROCESSOS', 'PROCESSO_DADOS', 'FORMULARIOS',
@@ -80,12 +86,20 @@ function autTouchOperationalRevision_(name) {
 
 function autOperationalExternalMarker_() {
   var modified = '';
-  try { modified = String(DriveApp.getFileById(AUTENTIKO.SPREADSHEET_ID).getLastUpdated().getTime()); }
-  catch (ignore) { modified = 'drive-unavailable'; }
+  var cache = CacheService.getScriptCache();
+  var markerKey = 'AUT_OPERATIONAL_DRIVE_MARKER';
+  try { modified = cache.get(markerKey) || ''; } catch (ignoreCacheRead) {}
+  if (!modified) {
+    try {
+      modified = String(DriveApp.getFileById(AUTENTIKO.SPREADSHEET_ID).getLastUpdated().getTime());
+      cache.put(markerKey, modified, 20);
+    } catch (ignore) { modified = 'drive-unavailable'; }
+  }
   return [AUTENTIKO_OPERATIONAL_BATCH_VERSION_, autOperationalRevision_(), modified].join('|');
 }
 
 function autRequestTable_(name) {
+  if (!AUTENTIKO_REQUEST_TABLES_ACTIVE_) return null;
   return AUTENTIKO_REQUEST_TABLES_[String(name || '')] || null;
 }
 
@@ -203,13 +217,16 @@ function autOperationalBatchGet_(names) {
 
 function autPrimeOperationalTables_(options) {
   options = options || {};
-  if (!options.force && Object.keys(AUTENTIKO_REQUEST_TABLES_).length >= AUTENTIKO_OPERATIONAL_TABLE_NAMES_.length) {
-    return { marker:autOperationalExternalMarker_(), cacheHit:true, tables:Object.keys(AUTENTIKO_REQUEST_TABLES_) };
-  }
+  // A identidade acompanha também alterações feitas diretamente no Sheets.
+  // O acesso ao Drive que compõe esse marcador fica amortizado por 20 s.
   var marker = autOperationalExternalMarker_();
+  var cacheIdentity = marker;
+  if (!options.force && AUTENTIKO_REQUEST_TABLES_IDENTITY_ === cacheIdentity &&
+      Object.keys(AUTENTIKO_REQUEST_TABLES_).length >= AUTENTIKO_OPERATIONAL_TABLE_NAMES_.length) {
+    return { marker:marker, cacheHit:true, tables:Object.keys(AUTENTIKO_REQUEST_TABLES_) };
+  }
   // O cache não gira a cada minuto. Ele só muda quando a revisão operacional
-  // muda ou quando uma sincronização forçada for solicitada.
-  var cacheIdentity = [AUTENTIKO_OPERATIONAL_BATCH_VERSION_, autOperationalRevision_()].join('|');
+  // ou a planilha muda, ou quando uma sincronização forçada for solicitada.
   var cacheKey = 'AUT_OP_TABLES_' + AUTENTIKO_OPERATIONAL_BATCH_VERSION_.replace(/\W/g, '') + '_' + autHash_(cacheIdentity);
   var cache = CacheService.getScriptCache();
   var packed = !options.force ? autLargeCacheGet_(cache, cacheKey) : null;
@@ -223,6 +240,7 @@ function autPrimeOperationalTables_(options) {
     var table = packed[name] || { headers:[], values:[] };
     autSetRequestTable_(name, table.headers || [], table.values || []);
   });
+  AUTENTIKO_REQUEST_TABLES_IDENTITY_ = cacheIdentity;
   return { marker:marker, cacheHit:cacheHit, tables:Object.keys(AUTENTIKO_REQUEST_TABLES_) };
 }
 
@@ -426,8 +444,9 @@ function autUpdateRow_(name, rowNumber, patch) {
     var sheet = autSheet_(name);
     var headers = autHeaders_(sheet);
     var range = sheet.getRange(rowNumber, 1, 1, headers.length);
-    var requestRow = autRequestTable_(name) ? autRowAt_(name, rowNumber) : null;
-    var row = requestRow ? headers.map(function(header) { return requestRow[header]; }) : range.getValues()[0];
+    // Nunca regrave uma linha a partir do snapshot. Outro usuário pode ter
+    // alterado colunas dessa linha depois que o snapshot foi produzido.
+    var row = range.getValues()[0];
     if (name === 'BASE_CLIENTES' && typeof autMasterInvalidateLookupCache_ === 'function') {
       autMasterInvalidateLookupCache_(row[headers.indexOf('TIPO_PESSOA')], row[headers.indexOf('CPF_CNPJ')]);
       autMasterInvalidateLookupCache_(patch.TIPO_PESSOA || row[headers.indexOf('TIPO_PESSOA')], patch.CPF_CNPJ || row[headers.indexOf('CPF_CNPJ')]);
@@ -558,6 +577,8 @@ function autInvalidateCaches_() {
   AUTENTIKO_DB_INSTANCE_ = null;
   AUTENTIKO_SHEET_INSTANCES_ = {};
   AUTENTIKO_REQUEST_TABLES_ = {};
+  AUTENTIKO_REQUEST_TABLES_ACTIVE_ = false;
+  AUTENTIKO_REQUEST_TABLES_IDENTITY_ = '';
 }
 
 function autPublicConfig_() {
