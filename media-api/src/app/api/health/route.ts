@@ -31,7 +31,7 @@ export async function GET(request: Request) {
     ok: true,
     data: {
       service: 'autentiko-media-api',
-      version: '2.8.0',
+      version: '2.9.6',
       region: process.env.VERCEL_REGION || 'local',
       time: new Date().toISOString(),
       database,
