@@ -2,7 +2,7 @@
   "name": "@autentiko/media-api",
   "private": true,
   "type": "module",
-  "version": "2.8.0",
+  "version": "2.9.6",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -14,11 +14,11 @@
     "@neondatabase/serverless": "^1.1.0",
     "@supabase/supabase-js": "2.110.8",
     "cloudinary": "^2.11.0",
-    "next": "16.2.11",
+    "next": "16.3.4",
     "postcss": "8.5.23",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "sharp": "0.35.3",
+    "sharp": "0.35.4",
     "tus-js-client": "4.3.1",
     "zod": "4.4.3"
   },
